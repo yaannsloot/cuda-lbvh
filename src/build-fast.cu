@@ -1,26 +1,5 @@
-// Copyright (c) 2022-2026 Nol Moonen
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
-
-// CHANGE THIS FILE
-
 #include "build.h"
+#include "build-fast.h"
 #include "bvh.h"
 #include "util.h"
 #include "vec_math_helper.h"
@@ -28,13 +7,70 @@
 #include <cub/device/device_radix_sort.cuh>
 #include <sutil/vec_math.h>
 
+// This is a copy of build.cu. Modify it to be faster.
+// Gets compiled to cuda-lbvh-fast
+
+/* \brief Interleave the first 10 bits of x every three bits,
+ * ie insert two zeroes between every of the first 10 bits of x
+ * \param x Quantitized position, must be between 0 and 2^10 - 1 = 1023
+ */
+__device__ __forceinline__ uint32_t InterleaveBits32(uint32_t x) {
+    /* Comments generated with Python from https://stackoverflow.com/questions/18529057/produce-interleaving-bit-patterns-morton-keys-for-32-bit-64-bit-and-128bit */
+
+    /*
+     * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 1111 1111
+     * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000  hex: 0x300
+     * Shifted part (<< 16):   0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 0000 0000  hex: 0x3000000
+     * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1111 1111  hex: 0xff
+     * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 1111 1111  hex: 0x30000ff
+     */
+    x = (x | (x << 16)) & 0x30000ff;
+
+    /*
+     * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 1111 1111
+     * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1111 0000  hex: 0xf0
+     * Shifted part (<< 8):    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1111 0000 0000 0000  hex: 0xf000
+     * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 0000 1111  hex: 0x300000f
+     * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 1111 0000 0000 1111  hex: 0x300f00f
+     */
+    x = (x | (x << 8)) & 0x300f00f;
+
+    /*
+     * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 1111 0000 0000 1111
+     * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1100 0000 0000 1100  hex: 0xc00c
+     * Shifted part (<< 4):    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1100 0000 0000 1100 0000  hex: 0xc00c0
+     * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0011 0000 0000 0011  hex: 0x3003003
+     * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 1100 0011 0000 1100 0011  hex: 0x30c30c3
+     */
+    x = (x | (x << 4)) & 0x30c30c3;
+
+    /*
+     * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 1100 0011 0000 1100 0011
+     * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0010 0000 1000 0010 0000 1000 0010  hex: 0x2082082
+     * Shifted part (<< 2):    0000 0000 0000 0000 0000 0000 0000 0000 0000 1000 0010 0000 1000 0010 0000 1000  hex: 0x8208208
+     * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0001 0000 0100 0001 0000 0100 0001  hex: 0x1041041
+     * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 1001 0010 0100 1001 0010 0100 1001  hex: 0x9249249
+     */
+    x = (x | (x << 2)) & 0x9249249;
+
+    return x;
+}
+
+/* \brief Compute a 32-bit Morton code for the given quantitized 3D point
+ * \param x The quantitized x coordinate
+ * \param y The quantitized y coordinate
+ * \param z The quantitized z coordinate
+ */
+__device__ __forceinline__ uint32_t MortonCode32(uint32_t x, uint32_t y, uint32_t z) {
+    return InterleaveBits32(x) | InterleaveBits32(y) << 1 | InterleaveBits32(z) << 2;
+}
+
 __device__ int get_leaf_node_idx(int i, int num_triangles) { return num_triangles - 1 + i; }
 
 __device__ int get_internal_node_idx(int i) { return i; }
 
 /// Expands a 10-bit integer into 30 bits by inserting 2 zeros after each bit.
-__forceinline__ __device__ unsigned int expand_bits(unsigned int v)
-{
+__forceinline__ __device__ unsigned int expand_bits(unsigned int v) {
     v = (v * 0x00010001u) & 0xFF0000FFu;
     v = (v * 0x00000101u) & 0x0F00F00Fu;
     v = (v * 0x00000011u) & 0xC30C30C3u;
@@ -44,11 +80,10 @@ __forceinline__ __device__ unsigned int expand_bits(unsigned int v)
 
 /// Calculates a 30-bit Morton code for the given 3D point located
 /// within the unit cube [0,1].
-__forceinline__ __device__ unsigned int morton_3d(float x, float y, float z)
-{
-    x               = fclampf(x * 1024.f, 0.f, 1023.f);
-    y               = fclampf(y * 1024.f, 0.f, 1023.f);
-    z               = fclampf(z * 1024.f, 0.f, 1023.f);
+__forceinline__ __device__ unsigned int morton_3d(float x, float y, float z) {
+    x = fclampf(x * 1024.f, 0.f, 1023.f);
+    y = fclampf(y * 1024.f, 0.f, 1023.f);
+    z = fclampf(z * 1024.f, 0.f, 1023.f);
     unsigned int xx = expand_bits((unsigned int)x);
     unsigned int yy = expand_bits((unsigned int)y);
     unsigned int zz = expand_bits((unsigned int)z);
@@ -57,21 +92,21 @@ __forceinline__ __device__ unsigned int morton_3d(float x, float y, float z)
 
 // For every triangle, assign a Morton code based on its center.
 __global__ void assign_morton(
-    const float3* positions,
-    const int* pos_indices,
+    const float3 *positions,
+    const int *pos_indices,
     float3 scene_offset,
     float3 scene_extent,
-    unsigned int* d_morton,
-    unsigned int* d_ids,
-    unsigned int object_count)
-{
+    unsigned int *d_morton,
+    unsigned int *d_ids,
+    unsigned int object_count) {
     const unsigned int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (thread_id >= object_count) return;
+    if (thread_id >= object_count)
+        return;
 
     // obtain center of triangle
-    int idx_u  = pos_indices[3 * thread_id + 0];
-    int idx_v  = pos_indices[3 * thread_id + 1];
-    int idx_w  = pos_indices[3 * thread_id + 2];
+    int idx_u = pos_indices[3 * thread_id + 0];
+    int idx_v = pos_indices[3 * thread_id + 1];
+    int idx_w = pos_indices[3 * thread_id + 2];
     float3 pos = (1.f / 3.f) * (positions[idx_u] + positions[idx_v] + positions[idx_w]);
 
     // normalize position
@@ -85,18 +120,18 @@ __global__ void assign_morton(
 
     // obtain and set morton code based on normalized position
     d_morton[thread_id] = morton_3d(x, y, z);
-    d_ids[thread_id]    = thread_id;
+    d_ids[thread_id] = thread_id;
 }
 
 // todo this kernel is pretty small, can it be combined with another?
 __global__ void leaf_nodes(
-    unsigned int* sorted_object_ids, unsigned int num_objects, bvh_node* nodes)
-{
+    unsigned int *sorted_object_ids, unsigned int num_objects, bvh_node *nodes) {
     const unsigned int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (thread_id >= num_objects) return;
+    if (thread_id >= num_objects)
+        return;
 
-    bvh_node* internal_nodes = nodes;
-    bvh_node* leaf_nodes     = nodes + num_objects - 1;
+    bvh_node *internal_nodes = nodes;
+    bvh_node *leaf_nodes = nodes + num_objects - 1;
 
     // no need to set parent to nullptr, each child will have a parent
     leaf_nodes[thread_id].object_id = sorted_object_ids[thread_id];
@@ -105,14 +140,15 @@ __global__ void leaf_nodes(
 
     // Need to set for internal node parent to nullptr, to detect the root node.
     // There is one less internal node than leaf node, test for that.
-    if (thread_id >= num_objects - 1) return;
+    if (thread_id >= num_objects - 1)
+        return;
     internal_nodes[thread_id].paren = -1;
 }
 
-__forceinline__ __device__ int delta(int l, int r, unsigned int n, unsigned int* c, unsigned int kl)
-{
+__forceinline__ __device__ int delta(int l, int r, unsigned int n, unsigned int *c, unsigned int kl) {
     // this guard is for leaf nodes, not internal nodes (hence [0, n-1])
-    if (r < 0 || r > n - 1) return -1;
+    if (r < 0 || r > n - 1)
+        return -1;
     unsigned int kr = c[r];
     if (kl == kr) {
         // if keys are equal, use id as fallback
@@ -124,22 +160,21 @@ __forceinline__ __device__ int delta(int l, int r, unsigned int n, unsigned int*
 }
 
 __forceinline__ __device__ int2
-determine_range(unsigned int* sorted_morton_codes, unsigned int n, int i)
-{
-    unsigned int* c = sorted_morton_codes;
+determine_range(unsigned int *sorted_morton_codes, unsigned int n, int i) {
+    unsigned int *c = sorted_morton_codes;
     unsigned int ki = c[i]; // key of i
 
     // determine direction of the range (+1 or -1)
     const int delta_l = delta(i, i - 1, n, c, ki);
     const int delta_r = delta(i, i + 1, n, c, ki);
 
-    int d; // direction
+    int d;         // direction
     int delta_min; // min of delta_r and delta_l
     if (delta_r < delta_l) {
-        d         = -1;
+        d = -1;
         delta_min = delta_r;
     } else {
-        d         = 1;
+        d = 1;
         delta_min = delta_l;
     }
 
@@ -163,8 +198,7 @@ determine_range(unsigned int* sorted_morton_codes, unsigned int n, int i)
 }
 
 __forceinline__ __device__ int find_split(
-    unsigned int* sorted_morton_codes, int first, int last, unsigned int n)
-{
+    unsigned int *sorted_morton_codes, int first, int last, unsigned int n) {
     const unsigned int first_code = sorted_morton_codes[first];
 
     // calculate the number of highest bits that are the same
@@ -177,10 +211,10 @@ __forceinline__ __device__ int find_split(
     // shares more than commonPrefix bits with the first one
 
     int split = first; // initial guess
-    int step  = last - first;
+    int step = last - first;
 
     do {
-        step                = (step + 1) >> 1; // exponential decrease
+        step = (step + 1) >> 1;             // exponential decrease
         const int new_split = split + step; // proposed new position
 
         if (new_split < last) {
@@ -196,16 +230,16 @@ __forceinline__ __device__ int find_split(
 
 // Build the internal nodes.
 __global__ void internal_nodes(
-    unsigned int* sorted_morton_codes,
-    unsigned int* sorted_object_ids,
+    unsigned int *sorted_morton_codes,
+    unsigned int *sorted_object_ids,
     unsigned int num_objects,
-    bvh_node* nodes)
-{
+    bvh_node *nodes) {
     const unsigned int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
     // N.B., we want i in range [0, num_objects - 1) since every thread sets one internal node.
-    if (thread_id >= num_objects - 1) return;
+    if (thread_id >= num_objects - 1)
+        return;
 
-    bvh_node* internal_nodes = nodes;
+    bvh_node *internal_nodes = nodes;
 
     // find out which range of objects the node corresponds to
     const int2 range = determine_range(sorted_morton_codes, num_objects, thread_id);
@@ -233,19 +267,17 @@ __global__ void internal_nodes(
     internal_nodes[thread_id].child_l = child_l;
     internal_nodes[thread_id].child_r = child_r;
     internal_nodes[thread_id].visited = 0;
-    nodes[child_l].paren              = get_internal_node_idx(thread_id);
-    nodes[child_r].paren              = get_internal_node_idx(thread_id);
+    nodes[child_l].paren = get_internal_node_idx(thread_id);
+    nodes[child_r].paren = get_internal_node_idx(thread_id);
 }
 
 // Load float3 at global level (cache in L2 and below, not L1).
-__device__ float3 __ldcg(const float3* p)
-{
+__device__ float3 __ldcg(const float3 *p) {
     return make_float3(__ldcg(&(p->x)), __ldcg(&(p->y)), __ldcg(&(p->z)));
 }
 
 // Store float3 at global level (cache in L2 and below, not L1).
-__device__ void __stcg(float3* p, const float3& q)
-{
+__device__ void __stcg(float3 *p, const float3 &q) {
     __stcg(&(p->x), q.x);
     __stcg(&(p->y), q.y);
     __stcg(&(p->z), q.z);
@@ -253,12 +285,12 @@ __device__ void __stcg(float3* p, const float3& q)
 
 // Set internal node bounding boxes by traversing the tree from the leaf nodes.
 __global__ void set_aabb(
-    unsigned int num_objects, bvh_node* nodes, const float3* positions, const int* pos_indices)
-{
+    unsigned int num_objects, bvh_node *nodes, const float3 *positions, const int *pos_indices) {
     const unsigned int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (thread_id >= num_objects) return;
+    if (thread_id >= num_objects)
+        return;
 
-    bvh_node* leaf_nodes = nodes + num_objects - 1;
+    bvh_node *leaf_nodes = nodes + num_objects - 1;
 
     const unsigned int object_id = leaf_nodes[thread_id].object_id;
 
@@ -289,24 +321,26 @@ __global__ void set_aabb(
         __threadfence();
 
         // We have reached the parent of the root node: terminate.
-        if (curr_node_idx == -1) break;
+        if (curr_node_idx == -1)
+            break;
 
-        bvh_node& curr_node = nodes[curr_node_idx];
+        bvh_node &curr_node = nodes[curr_node_idx];
 
         // We have reached an inner node: check whether the node was visited.
         unsigned int visited = atomicAdd(&(curr_node.visited), 1);
         assert(visited == 0 || visited == 1);
 
         // This is the first thread entering: terminate
-        if (visited == 0) break;
+        if (visited == 0)
+            break;
 
         __threadfence();
 
         // This is the second thread entering, we know that our sibling has reached
         // the current node and terminated, and hence the sibling bounding box is correct.
 
-        const bvh_node& child_l = nodes[curr_node.child_l];
-        const bvh_node& child_r = nodes[curr_node.child_r];
+        const bvh_node &child_l = nodes[curr_node.child_l];
+        const bvh_node &child_r = nodes[curr_node.child_r];
 
         // Set running bounding box to be the union of bounding boxes.
         const float3 a_min = __ldcg(&(child_l.min));
@@ -322,8 +356,7 @@ __global__ void set_aabb(
     }
 }
 
-bool build(const scene& s, bvh& bvh)
-{
+bool build(const scene &s, bvh &bvh) {
     const int num_triangles = s.pos_indices.size() / 3;
     // must have at least two triangles. we cannot build a bvh for zero
     // triangles, and a bvh of one triangle has no internal nodes
@@ -345,17 +378,17 @@ bool build(const scene& s, bvh& bvh)
     buf_gpu<unsigned int> d_ids_sorted;
     RETURN_IF_FALSE(d_ids_sorted.resize(num_triangles));
 
-    auto sort = [&](void* d_tmp, size_t& tmp_size) {
+    auto sort = [&](void *d_tmp, size_t &tmp_size) {
         // We don't actually need `keys_out` and `values_in` can be a
         // counting iterator, but `DeviceRadixSort` needs both as
         // backing storage.
         return cub::DeviceRadixSort::SortPairs(
             d_tmp,
             tmp_size,
-            d_morton.get_ptr(), // keys_in
+            d_morton.get_ptr(),        // keys_in
             d_morton_sorted.get_ptr(), // keys_out
-            d_ids.get_ptr(), // values_in
-            d_ids_sorted.get_ptr(), // values_out
+            d_ids.get_ptr(),           // values_in
+            d_ids_sorted.get_ptr(),    // values_out
             num_triangles);
     };
 
