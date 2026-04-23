@@ -35,24 +35,52 @@ __device__ int get_internal_node_idx(int i) { return i; }
 /// Expands a 10-bit integer into 30 bits by inserting 2 zeros after each bit.
 __forceinline__ __device__ unsigned int expand_bits(unsigned int v)
 {
-    v = (v * 0x00010001u) & 0xFF0000FFu;
-    v = (v * 0x00000101u) & 0x0F00F00Fu;
-    v = (v * 0x00000011u) & 0xC30C30C3u;
-    v = (v * 0x00000005u) & 0x49249249u;
-    return v;
+   /* Comments generated with Python from https://stackoverflow.com/questions/18529057/produce-interleaving-bit-patterns-morton-keys-for-32-bit-64-bit-and-128bit */
+
+		/*
+		 * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 1111 1111
+		 * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000  hex: 0x300
+		 * Shifted part (<< 16):   0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 0000 0000  hex: 0x3000000
+		 * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1111 1111  hex: 0xff
+		 * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 1111 1111  hex: 0x30000ff
+		 */
+		x = (x | (x << 16)) & 0x30000ff;
+
+		/*
+		 * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 1111 1111
+		 * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1111 0000  hex: 0xf0
+		 * Shifted part (<< 8):    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1111 0000 0000 0000  hex: 0xf000
+		 * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 0000 1111  hex: 0x300000f
+		 * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 1111 0000 0000 1111  hex: 0x300f00f
+		 */
+		x = (x | (x << 8)) & 0x300f00f;
+
+		/*
+		 * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 1111 0000 0000 1111
+		 * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1100 0000 0000 1100  hex: 0xc00c
+		 * Shifted part (<< 4):    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1100 0000 0000 1100 0000  hex: 0xc00c0
+		 * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0011 0000 0000 0011  hex: 0x3003003
+		 * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 1100 0011 0000 1100 0011  hex: 0x30c30c3
+		 */
+		x = (x | (x << 4)) & 0x30c30c3;
+
+		/*
+		 * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 1100 0011 0000 1100 0011
+		 * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0010 0000 1000 0010 0000 1000 0010  hex: 0x2082082
+		 * Shifted part (<< 2):    0000 0000 0000 0000 0000 0000 0000 0000 0000 1000 0010 0000 1000 0010 0000 1000  hex: 0x8208208
+		 * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0001 0000 0100 0001 0000 0100 0001  hex: 0x1041041
+		 * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 1001 0010 0100 1001 0010 0100 1001  hex: 0x9249249
+		 */
+		x = (x | (x << 2)) & 0x9249249;
+
+		return x;
 }
 
 /// Calculates a 30-bit Morton code for the given 3D point located
 /// within the unit cube [0,1].
 __forceinline__ __device__ unsigned int morton_3d(float x, float y, float z)
 {
-    x               = fclampf(x * 1024.f, 0.f, 1023.f);
-    y               = fclampf(y * 1024.f, 0.f, 1023.f);
-    z               = fclampf(z * 1024.f, 0.f, 1023.f);
-    unsigned int xx = expand_bits((unsigned int)x);
-    unsigned int yy = expand_bits((unsigned int)y);
-    unsigned int zz = expand_bits((unsigned int)z);
-    return xx * 4 + yy * 2 + zz;
+    return expand_bits(x) | expand_bits(y) << 1 | expand_bits(z) << 2;
 }
 
 // For every triangle, assign a Morton code based on its center.
