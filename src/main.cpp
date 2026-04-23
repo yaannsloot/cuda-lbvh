@@ -32,18 +32,20 @@
 #endif
 
 #include <cstdio>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 bool run(
-    const char* file_in,
-    const char* file_out,
+    std::string file_in,
+    bool do_render,
+    std::string file_out,
     unsigned int size_x,
     unsigned int size_y,
     unsigned int sample_count,
     float3 origin,
     float3 target,
-    float3 up)
-{
+    float3 up) {
     // parse obj file
     scene s;
     RETURN_IF_FALSE(read_scene(s, file_in));
@@ -52,46 +54,82 @@ bool run(
     bvh bvh;
     RETURN_IF_FALSE(build(s, bvh));
 
-    // generate image
-    buf_cpu<uchar> image;
-    RETURN_IF_FALSE(image.resize(size_y * size_x * 3));
-    RETURN_IF_FALSE(
-        generate(size_x, size_y, sample_count, image.get_ptr(), bvh, origin, target, up));
+    if (do_render) {
+        // generate image
+        buf_cpu<uchar> image;
+        RETURN_IF_FALSE(image.resize(size_y * size_x * 3));
+        RETURN_IF_FALSE(
+            generate(size_x, size_y, sample_count, image.get_ptr(), bvh, origin, target, up));
 
-    // write image to file
-    stbi_flip_vertically_on_write(1);
-    stbi_write_png(file_out, size_x, size_y, 3, image.get_ptr(), size_x * 3);
-    printf("generated %s\n", file_out);
+        // write image to file
+        stbi_flip_vertically_on_write(1);
+        stbi_write_png(file_out.c_str(), size_x, size_y, 3, image.get_ptr(), size_x * 3);
+        printf("generated %s\n", file_out.c_str());
+    }
 
     return true;
 }
 
-int main(int argc, char* argv[])
-{
-    if (argc != 15) {
-        fprintf(stderr, "did not specify correct amount of parameters\n");
-        return EXIT_FAILURE;
+int main(int argc, char *argv[]) {
+    std::unordered_map<std::string, std::string> flags{
+        {"--out-img", "render.png"}}; // Add flags in here for default values
+
+    std::unordered_set<std::string> accepting_flags{
+        "--out-img"}; // Sets which flags expect a value.
+
+    std::vector<std::string> args;
+
+    for (int i = 0; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg.length() > 2 && arg.rfind("--", 0) == 0) {
+            std::string val;
+            if (accepting_flags.find(arg) != accepting_flags.end()) {
+                if (i + 1 >= argc) {
+                    printf("Missing value for flag %s\n", arg);
+                    return EXIT_FAILURE;
+                }
+                val = argv[i + 1];
+                ++i;
+            }
+            flags[arg] = val;
+            continue;
+        }
+        args.push_back(arg);
     }
 
     // read input
-    const char* file_in  = argv[1];
-    const char* file_out = argv[2];
-    unsigned int size_x, size_y, sample_count;
-    sscanf(argv[3], "%u", &size_x);
-    sscanf(argv[4], "%u", &size_y);
-    sscanf(argv[5], "%u", &sample_count);
-    float3 origin, target, up;
-    sscanf(argv[6], "%f", &origin.x);
-    sscanf(argv[7], "%f", &origin.y);
-    sscanf(argv[8], "%f", &origin.z);
-    sscanf(argv[9], "%f", &target.x);
-    sscanf(argv[10], "%f", &target.y);
-    sscanf(argv[11], "%f", &target.z);
-    sscanf(argv[12], "%f", &up.x);
-    sscanf(argv[13], "%f", &up.y);
-    sscanf(argv[14], "%f", &up.z);
+    bool do_render = flags.find("--render") != flags.end();
+    int required_args = (do_render) ? 13 : 1;
+    if (args.size() - 1 < required_args) {
+        printf("Missing required args. Expected %d but got %d.\n", required_args, args.size() - 1);
+        return EXIT_FAILURE;
+    }
 
-    if (!run(file_in, file_out, size_x, size_y, sample_count, origin, target, up)) {
+    unsigned int size_x, size_y, sample_count;
+    float3 origin, target, up;
+
+    if (do_render) {
+        try {
+            size_x = static_cast<unsigned int>(std::stoul(args[2]));
+            size_y = static_cast<unsigned int>(std::stoul(args[3]));
+            sample_count = static_cast<unsigned int>(std::stoul(args[4]));
+
+            origin.x = std::stof(args[5]);
+            origin.y = std::stof(args[6]);
+            origin.z = std::stof(args[7]);
+            target.x = std::stof(args[8]);
+            target.y = std::stof(args[9]);
+            target.z = std::stof(args[10]);
+            up.x = std::stof(args[11]);
+            up.y = std::stof(args[12]);
+            up.z = std::stof(args[13]);
+        } catch (const std::exception &e) {
+            printf("Failed to parse input.\n");
+            return EXIT_FAILURE;
+        }
+    }
+
+    if (!run(args[1], do_render, flags["--out-img"], size_x, size_y, sample_count, origin, target, up)) {
         return EXIT_FAILURE;
     }
 }

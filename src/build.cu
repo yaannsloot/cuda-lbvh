@@ -320,8 +320,29 @@ __global__ void set_aabb(
     }
 }
 
-bool build(const scene& s, bvh& bvh)
-{
+struct kernel_timer {
+    cudaEvent_t start, stop;
+    const char *name;
+
+    kernel_timer(const char *n) : name(n) {
+        cudaEventCreate(&start);
+        cudaEventCreate(&stop);
+    }
+    ~kernel_timer() {
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+    }
+    void begin() { cudaEventRecord(start); }
+    void end() { cudaEventRecord(stop); }
+    float ms() {
+        cudaEventSynchronize(stop);
+        float t = 0.f;
+        cudaEventElapsedTime(&t, start, stop);
+        return t;
+    }
+};
+
+bool build(const scene &s, bvh &bvh) {
     const int num_triangles = s.pos_indices.size() / 3;
     // must have at least two triangles. we cannot build a bvh for zero
     // triangles, and a bvh of one triangle has no internal nodes
@@ -343,17 +364,17 @@ bool build(const scene& s, bvh& bvh)
     buf_gpu<unsigned int> d_ids_sorted;
     RETURN_IF_FALSE(d_ids_sorted.resize(num_triangles));
 
-    auto sort = [&](void* d_tmp, size_t& tmp_size) {
+    auto sort = [&](void *d_tmp, size_t &tmp_size) {
         // We don't actually need `keys_out` and `values_in` can be a
         // counting iterator, but `DeviceRadixSort` needs both as
         // backing storage.
         return cub::DeviceRadixSort::SortPairs(
             d_tmp,
             tmp_size,
-            d_morton.get_ptr(), // keys_in
+            d_morton.get_ptr(),        // keys_in
             d_morton_sorted.get_ptr(), // keys_out
-            d_ids.get_ptr(), // values_in
-            d_ids_sorted.get_ptr(), // values_out
+            d_ids.get_ptr(),           // values_in
+            d_ids_sorted.get_ptr(),    // values_out
             num_triangles);
     };
 
@@ -402,6 +423,13 @@ bool build(const scene& s, bvh& bvh)
     const int block_size = 1024;
     const int num_blocks = ceiling_div(num_triangles, static_cast<unsigned int>(block_size));
 
+    kernel_timer t_morton("assign_morton");
+    kernel_timer t_sort  ("radix_sort"); // Don't think we'll be messing with this one
+    kernel_timer t_leaf  ("leaf_nodes");
+    kernel_timer t_intrn ("internal_nodes");
+    kernel_timer t_aabb  ("set_aabb");
+
+    t_morton.begin();
     assign_morton<<<num_blocks, block_size>>>(
         bvh.positions.get_ptr(),
         bvh.pos_indices.get_ptr(),
@@ -410,25 +438,34 @@ bool build(const scene& s, bvh& bvh)
         d_morton.get_ptr(),
         d_ids.get_ptr(),
         num_triangles);
+    t_morton.end();
     RETURN_IF_CUDA_ERR(cudaGetLastError());
 
     // Run sorting operation, sorting is stable.
     // https://nvidia.github.io/cccl/unstable/cub/api/structcub_1_1DeviceRadixSort.html
+    t_sort.begin();
     RETURN_IF_CUDA_ERR(sort(d_tmp.get_ptr(), num_tmp_bytes));
+    t_sort.end();
 
     // construct leaf nodes
+    t_leaf.begin();
     leaf_nodes<<<num_blocks, block_size>>>(
         d_ids_sorted.get_ptr(), num_triangles, bvh.nodes.get_ptr());
+    t_leaf.end();
     RETURN_IF_CUDA_ERR(cudaGetLastError());
 
     // construct internal nodes
+    t_intrn.begin();
     internal_nodes<<<num_blocks, block_size>>>(
         d_morton_sorted.get_ptr(), d_ids_sorted.get_ptr(), num_triangles, bvh.nodes.get_ptr());
+    t_intrn.end();
     RETURN_IF_CUDA_ERR(cudaGetLastError());
 
     // calculate bounding boxes by walking the hierarchy toward the root
+    t_aabb.begin();
     set_aabb<<<num_blocks, block_size>>>(
         num_triangles, bvh.nodes.get_ptr(), bvh.positions.get_ptr(), bvh.pos_indices.get_ptr());
+    t_aabb.end();
     RETURN_IF_CUDA_ERR(cudaGetLastError());
 
     // print elapsed time
@@ -440,7 +477,11 @@ bool build(const scene& s, bvh& bvh)
     printf(
         "building took %6.5fms, %6.2f million triangles per second\n",
         milliseconds,
-        num_triangles / seconds * 1e-6f);
-
+        num_triangles / seconds * 1e-6f);    
+    printf("  assign_morton:   %7.4f ms\n", t_morton.ms());
+    printf("  radix_sort:      %7.4f ms\n", t_sort.ms());
+    printf("  leaf_nodes:      %7.4f ms\n", t_leaf.ms());
+    printf("  internal_nodes:  %7.4f ms\n", t_intrn.ms());
+    printf("  set_aabb:        %7.4f ms\n", t_aabb.ms());
     return true;
 }

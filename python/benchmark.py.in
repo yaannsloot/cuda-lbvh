@@ -22,40 +22,47 @@
 
 import subprocess
 import os
+import sys
 
 exe_loc = '$<TARGET_FILE:cuda-lbvh>'
+fast_exe_loc = '$<TARGET_FILE:cuda-lbvh-fast>'
 obj_dir = '@CMAKE_SOURCE_DIR@/scenes'
 
 if __name__ == '__main__':
     size = 1000
     samples = 250
+    render = "--render" if "--render" in sys.argv else ""
+    exe_loc = fast_exe_loc if "--fast" in sys.argv else exe_loc
     subprocess.run([
         exe_loc,
         os.path.join(obj_dir, 'sanmiguel.obj'),
-        'sanmiguel.png',
+        '--out-img', 'sanmiguel.png',
         str(size),
         str(size),
         str(samples),
         '8.0', '1.5', '10.5',  # origin
         '9.0', '1.5',  '9.5',  # target
-        '0.0', '1.0',  '0.0']) # up
+        '0.0', '1.0',  '0.0',
+        render]) # up
     subprocess.run([
         exe_loc,
         os.path.join(obj_dir, 'sibenik.obj'),
-        'sibenik.png',
+        '--out-img', 'sibenik.png',
         str(size),
         str(size),
         str(samples),
         '-15.5', '-2.5', '0.0',  # origin
         '-14.5', '-2.5', '0.0',  # target
-          '0.0',  '1.0', '0.0']) # up
+          '0.0',  '1.0', '0.0',
+          render]) # up
     subprocess.run([
         exe_loc,
         os.path.join(obj_dir, 'sponza.obj'),
-        'sponza.png',
+        '--out-img', 'sponza.png',
         str(size),
         str(size),
         str(samples),
         '800.0', '580.0', '-35.0',  # origin
         '799.0', '580.0', '-35.0',  # target
-          '0.0',   '1.0',   '0.0']) # up
+          '0.0',   '1.0',   '0.0',
+          render]) # up
