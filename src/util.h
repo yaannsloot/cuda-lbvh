@@ -165,3 +165,5 @@ using buf_gpu = buffer<t, allocator_gpu<t>>;
 // Simple non-initializing device buffer.
 template <typename t>
 using buf_cpu = buffer<t, allocator_cpu<t>>;
+
+

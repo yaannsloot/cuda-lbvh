@@ -22,6 +22,11 @@
 
 #include "obj_reader.h"
 
+#define WARP_SIZE 32
+#define FULL_MASK 0xFFFFFFFF
+#define INVALID_IDX 0xFFFFFFFF
+#define SEARCH_RADIUS 16
+
 struct hit {
     float3 hitpoint;
     /// Whether a hit is recorded.
@@ -60,4 +65,9 @@ struct bvh {
     buf_gpu<float3> normals;
     buf_gpu<int> pos_indices;
     buf_gpu<int> nor_indices;
+};
+
+//empty for now but will be needed later
+struct build_state {
+    
 };
