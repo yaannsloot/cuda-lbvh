@@ -10,6 +10,20 @@
 // This is a copy of build.cu. Modify it to be faster.
 // Gets compiled to cuda-lbvh-fast
 
+struct float2x3 {
+    float3 bounds[2];
+
+    __host__ __device__ float3& operator[](int i) { return bounds[i]; }
+    __host__ __device__ const float3& operator[](int i) const { return bounds[i]; }
+};
+
+struct cluster {
+    int node_idx;
+    float3 min;
+    float3 max;
+    int active;
+};
+
 /* \brief Interleave the first 10 bits of x every three bits,
  * ie insert two zeroes between every of the first 10 bits of x
  * \param x Quantitized position, must be between 0 and 2^10 - 1 = 1023
@@ -81,7 +95,7 @@ __forceinline__ __device__ unsigned int expand_bits(unsigned int v)
 		 * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1111 1111  hex: 0xff
 		 * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 1111 1111  hex: 0x30000ff
 		 */
-		x = (x | (x << 16)) & 0x30000ff;
+		v = (v | (v << 16)) & 0x30000ff;
 
 		/*
 		 * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 1111 1111
@@ -90,7 +104,7 @@ __forceinline__ __device__ unsigned int expand_bits(unsigned int v)
 		 * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 0000 1111  hex: 0x300000f
 		 * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 1111 0000 0000 1111  hex: 0x300f00f
 		 */
-		x = (x | (x << 8)) & 0x300f00f;
+		v = (v | (v << 8)) & 0x300f00f;
 
 		/*
 		 * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 1111 0000 0000 1111
@@ -99,7 +113,7 @@ __forceinline__ __device__ unsigned int expand_bits(unsigned int v)
 		 * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0011 0000 0000 0011  hex: 0x3003003
 		 * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 1100 0011 0000 1100 0011  hex: 0x30c30c3
 		 */
-		x = (x | (x << 4)) & 0x30c30c3;
+		v = (v | (v << 4)) & 0x30c30c3;
 
 		/*
 		 * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 1100 0011 0000 1100 0011
@@ -108,9 +122,9 @@ __forceinline__ __device__ unsigned int expand_bits(unsigned int v)
 		 * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0001 0000 0100 0001 0000 0100 0001  hex: 0x1041041
 		 * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 1001 0010 0100 1001 0010 0100 1001  hex: 0x9249249
 		 */
-		x = (x | (x << 2)) & 0x9249249;
+		v = (v | (v << 2)) & 0x9249249;
 
-		return x;
+		return v;
 }
 
 /// Calculates a 30-bit Morton code for the given 3D point located
@@ -159,6 +173,28 @@ __global__ void assign_morton(
     // Ends here
 
     d_ids[thread_id] = thread_id;
+}
+
+// todo this kernel is pretty small, can it be combined with another?
+__global__ void leaf_nodes(
+    unsigned int *sorted_object_ids, unsigned int num_objects, bvh_node *nodes) {
+    const unsigned int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (thread_id >= num_objects)
+        return;
+
+    bvh_node *internal_nodes = nodes;
+    bvh_node *leaf_nodes = nodes + num_objects - 1;
+
+    // no need to set parent to nullptr, each child will have a parent
+    leaf_nodes[thread_id].object_id = sorted_object_ids[thread_id];
+    // needed to recognize that this node is a leaf
+    leaf_nodes[thread_id].child_l = -1;
+
+    // Need to set for internal node parent to nullptr, to detect the root node.
+    // There is one less internal node than leaf node, test for that.
+    if (thread_id >= num_objects - 1)
+        return;
+    internal_nodes[thread_id].paren = -1;
 }
 
 
@@ -246,6 +282,49 @@ __forceinline__ __device__ int find_split(
     return split;
 }
 
+// Build the internal nodes.
+__global__ void internal_nodes(
+    unsigned int *sorted_morton_codes,
+    unsigned int *sorted_object_ids,
+    unsigned int num_objects,
+    bvh_node *nodes) {
+    const unsigned int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+    // N.B., we want i in range [0, num_objects - 1) since every thread sets one internal node.
+    if (thread_id >= num_objects - 1)
+        return;
+
+    bvh_node *internal_nodes = nodes;
+
+    // find out which range of objects the node corresponds to
+    const int2 range = determine_range(sorted_morton_codes, num_objects, thread_id);
+
+    // determine where to split the range
+    const int split = find_split(sorted_morton_codes, range.x, range.y, num_objects);
+
+    // select left child
+    int child_l;
+    if (split == range.x) {
+        child_l = get_leaf_node_idx(split, num_objects);
+    } else {
+        child_l = get_internal_node_idx(split);
+    }
+
+    // select right child
+    int child_r;
+    if (split + 1 == range.y) {
+        child_r = get_leaf_node_idx(split + 1, num_objects);
+    } else {
+        child_r = get_internal_node_idx(split + 1);
+    }
+
+    // record parent-child relationships
+    internal_nodes[thread_id].child_l = child_l;
+    internal_nodes[thread_id].child_r = child_r;
+    internal_nodes[thread_id].visited = 0;
+    nodes[child_l].paren = get_internal_node_idx(thread_id);
+    nodes[child_r].paren = get_internal_node_idx(thread_id);
+}
+
 
 // Load float3 at global level (cache in L2 and below, not L1).
 __device__ float3 __ldcg(const float3 *p) {
@@ -259,60 +338,245 @@ __device__ void __stcg(float3 *p, const float3 &q) {
     __stcg(&(p->z), q.z);
 }
 
-__host__ __device__ float2x3 grow(float2x3 a, float2x3 b){
+__host__ __device__ float2x3 make_bounds(float3 min, float3 max) {
+    float2x3 result;
+    result[0] = min;
+    result[1] = max;
+    return result;
+}
+
+__host__ __device__ float2x3 grow(float2x3 a, float2x3 b) {
     float2x3 result;
 
     result[0] = make_float3(fminf(a[0].x, b[0].x),
                             fminf(a[0].y, b[0].y),
                             fminf(a[0].z, b[0].z));
 
-    result[1] = make_float3(fmaxf(a[0].x, b[0].x),
-                            fmaxf(a[0].y, b[0].y),
-                            fmaxf(a[0].z, b[0].z));
+    result[1] = make_float3(fmaxf(a[1].x, b[1].x),
+                            fmaxf(a[1].y, b[1].y),
+                            fmaxf(a[1].z, b[1].z));
 
     return result;
 }
 
-__host__ __device__ float Area(float2x3 a) const {
-    float3 diff = a[0] - a[1];
-    return diff.x * diff.y + diff.y * diff.z + diff.z * diff.x;
+__host__ __device__ float Area(float2x3 a) {
+    float3 diff = fmaxf(a[1] - a[0], make_float3(0.f));
+    return 2.f * (diff.x * diff.y + diff.x * diff.z + diff.y * diff.z);
 }
 
-static inline __device__ uint32_t find_nearest_neighbor(uint32_t numPrim, float2x3 cluster_bounds){
+__host__ __device__ float surface_area(float3 min, float3 max) {
+    return Area(make_bounds(min, max));
+}
+
+__host__ __device__ float surface_area(const cluster &c) {
+    return surface_area(c.min, c.max);
+}
+
+__device__ float3 shfl_sync_float3(unsigned int mask, float3 value, int src_lane) {
+    return make_float3(
+        __shfl_sync(mask, value.x, src_lane),
+        __shfl_sync(mask, value.y, src_lane),
+        __shfl_sync(mask, value.z, src_lane));
+}
+
+__device__ float2x3 shfl_sync_float2x3(unsigned int mask, float2x3 value, int src_lane) {
+    return make_bounds(
+        shfl_sync_float3(mask, value[0], src_lane),
+        shfl_sync_float3(mask, value[1], src_lane));
+}
+
+__device__ uint2 shfl_sync_uint2(unsigned int mask, uint2 value, int src_lane) {
+    return make_uint2(
+        __shfl_sync(mask, value.x, src_lane),
+        __shfl_sync(mask, value.y, src_lane));
+}
+
+static inline __device__ uint32_t find_nearest_neighbor(uint32_t numPrim, float2x3 cluster_bounds) {
     
     uint32_t warp_id = threadIdx.x & (WARP_SIZE - 1);
 
-    uint2 min_area_index = make_uint2(INVALID_IDX);
+    uint2 min_area_index = make_uint2(INVALID_IDX, INVALID_IDX);
 
-    for (ushort r = 1 ; r <= SEARCH_RADIUS; r++){
+    for (unsigned short r = 1; r <= SEARCH_RADIUS; r++) {
         uint32_t neighbor_index = warp_id + r;
         uint32_t area = (uint32_t)(-1);
+        const int neighbor_lane = static_cast<int>(neighbor_index);
+        const int src_lane = neighbor_lane < WARP_SIZE ? neighbor_lane : static_cast<int>(warp_id);
 
-        float2x3 neighbor_bounds = shfl_sync(FULL_MASK, cluster_bounds, neighbor_index);
+        float2x3 neighbor_bounds = shfl_sync_float2x3(FULL_MASK, cluster_bounds, src_lane);
 
-        if(neighbor_index < numPrim){
+        if (neighbor_lane < WARP_SIZE && neighbor_index < numPrim) {
             neighbor_bounds = grow(neighbor_bounds, cluster_bounds);
 
             area = __float_as_uint(Area(neighbor_bounds));
 
-            if(area < min_area_index.x){ 
+            if (area < min_area_index.x) {
                 min_area_index = make_uint2(area, neighbor_index);
             }
         }
 
-        uint2 neighbor_nn = shfl_sync(FULL_MASK, min_area_index, neighbor_index);
+        uint2 neighbor_nn = shfl_sync_uint2(FULL_MASK, min_area_index, src_lane);
 
-        if(area < neighbor_nn.x){
-            neighbor_nn = make_int2(area, warp_id);
+        if (area < neighbor_nn.x) {
+            neighbor_nn = make_uint2(area, warp_id);
         }
 
-        min_area_index = shfl_sync(FULL_MASK, neighbor_nn, warp_id - r)
+        const int back_lane = static_cast<int>(warp_id) - r;
+        const int dst_lane = back_lane >= 0 ? back_lane : static_cast<int>(warp_id);
+        const uint2 back_neighbor_nn = shfl_sync_uint2(FULL_MASK, neighbor_nn, dst_lane);
+        if (back_lane >= 0)
+            min_area_index = back_neighbor_nn;
     }
 
     return min_area_index.y;
 }
 
+__device__ cluster make_cluster_from_leaf(int node_idx, float3 min, float3 max) {
+    cluster c;
+    c.node_idx = node_idx;
+    c.min = min;
+    c.max = max;
+    c.active = 1;
+    return c;
+}
 
+__global__ void make_clusters(
+    unsigned int *sorted_object_ids,
+    unsigned int num_objects,
+    const float3 *positions,
+    const int *pos_indices,
+    bvh_node *nodes,
+    cluster *clusters) {
+    const unsigned int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (thread_id >= num_objects)
+        return;
+
+    const unsigned int object_id = sorted_object_ids[thread_id];
+    const int idx_u = pos_indices[3 * object_id + 0];
+    const int idx_v = pos_indices[3 * object_id + 1];
+    const int idx_w = pos_indices[3 * object_id + 2];
+
+    const float3 u = positions[idx_u];
+    const float3 v = positions[idx_v];
+    const float3 w = positions[idx_w];
+    const float3 min = fminf(u, fminf(v, w));
+    const float3 max = fmaxf(u, fmaxf(v, w));
+
+    const int leaf_node_idx = get_leaf_node_idx(thread_id, num_objects);
+    bvh_node &leaf = nodes[leaf_node_idx];
+    leaf.object_id = object_id;
+    leaf.child_l = -1;
+    leaf.child_r = -1;
+    leaf.min = min;
+    leaf.max = max;
+
+    clusters[thread_id] = make_cluster_from_leaf(leaf_node_idx, min, max);
+
+    if (thread_id < num_objects - 1)
+        nodes[thread_id].paren = -1;
+}
+
+__device__ cluster merge_clusters_to_node(
+    const cluster &left,
+    const cluster &right,
+    bvh_node *nodes,
+    int new_node_idx) {
+    cluster parent;
+    parent.node_idx = new_node_idx;
+    parent.min = fminf(left.min, right.min);
+    parent.max = fmaxf(left.max, right.max);
+    parent.active = 1;
+
+    bvh_node &node = nodes[new_node_idx];
+    node.child_l = left.node_idx;
+    node.child_r = right.node_idx;
+    node.paren = -1;
+    node.min = parent.min;
+    node.max = parent.max;
+    node.visited = 0;
+
+    nodes[left.node_idx].paren = new_node_idx;
+    nodes[right.node_idx].paren = new_node_idx;
+
+    return parent;
+}
+
+__device__ bool is_active_cluster(const cluster &c) {
+    return c.active != 0 && c.node_idx != -1;
+}
+
+// Set internal node bounding boxes by traversing the tree from the leaf nodes.
+__global__ void set_aabb(
+    unsigned int num_objects, bvh_node *nodes, const float3 *positions, const int *pos_indices) {
+    const unsigned int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (thread_id >= num_objects)
+        return;
+
+    bvh_node *leaf_nodes = nodes + num_objects - 1;
+
+    const unsigned int object_id = leaf_nodes[thread_id].object_id;
+
+    int idx_u = pos_indices[3 * object_id + 0];
+    int idx_v = pos_indices[3 * object_id + 1];
+    int idx_w = pos_indices[3 * object_id + 2];
+
+    float3 u = positions[idx_u];
+    float3 v = positions[idx_v];
+    float3 w = positions[idx_w];
+
+    // set bounding box of leaf node
+    const float3 min = fminf(u, fminf(v, w));
+    const float3 max = fmaxf(u, fmaxf(v, w));
+
+    // Bounding boxes must be loaded and stored without caching in L1,
+    // as they may be loaded and stored by threads not on the same SM.
+
+    __stcg(&(leaf_nodes[thread_id].min), min);
+    __stcg(&(leaf_nodes[thread_id].max), max);
+
+    // Recursively set tree bounding boxes, `curr_node` is always an
+    // internal node (since it is parent of another).
+    int curr_node_idx = leaf_nodes[thread_id].paren;
+    while (true) {
+        // Memory fences must be used to lock-step setting the bounding
+        // boxes and marking nodes as visited.
+        __threadfence();
+
+        // We have reached the parent of the root node: terminate.
+        if (curr_node_idx == -1)
+            break;
+
+        bvh_node &curr_node = nodes[curr_node_idx];
+
+        // We have reached an inner node: check whether the node was visited.
+        unsigned int visited = atomicAdd(&(curr_node.visited), 1);
+        assert(visited == 0 || visited == 1);
+
+        // This is the first thread entering: terminate
+        if (visited == 0)
+            break;
+
+        __threadfence();
+
+        // This is the second thread entering, we know that our sibling has reached
+        // the current node and terminated, and hence the sibling bounding box is correct.
+
+        const bvh_node &child_l = nodes[curr_node.child_l];
+        const bvh_node &child_r = nodes[curr_node.child_r];
+
+        // Set running bounding box to be the union of bounding boxes.
+        const float3 a_min = __ldcg(&(child_l.min));
+        const float3 a_max = __ldcg(&(child_l.max));
+        const float3 b_min = __ldcg(&(child_r.min));
+        const float3 b_max = __ldcg(&(child_r.max));
+
+        __stcg(&(curr_node.min), fminf(a_min, b_min));
+        __stcg(&(curr_node.max), fmaxf(a_max, b_max));
+
+        // Continue traversal.
+        curr_node_idx = curr_node.paren;
+    }
+}
 
 struct kernel_timer {
     cudaEvent_t start, stop;
