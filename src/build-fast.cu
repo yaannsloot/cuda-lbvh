@@ -213,6 +213,10 @@ __forceinline__ __device__ int delta(int l, int r, unsigned int n, unsigned int 
     return __clz(kl ^ kr);
 }
 
+static ___forceinline__ __device__ uint fast_delta(unsigned int a, unsigned int b, unsigned int* morton_codes){
+    return (mortonCodes[a] << 32 | a)  ^ (mortonCodes[b] << 32 | b);
+}
+
 __forceinline__ __device__ int2
 determine_range(unsigned int *sorted_morton_codes, unsigned int n, int i) {
     unsigned int *c = sorted_morton_codes;
@@ -389,6 +393,13 @@ __device__ uint2 shfl_sync_uint2(unsigned int mask, uint2 value, int src_lane) {
     return make_uint2(
         __shfl_sync(mask, value.x, src_lane),
         __shfl_sync(mask, value.y, src_lane));
+}
+
+static ___forceinline__ __device__ uint find_parent__id(unsigned int left, unsigned int right, unsigned int primCount, unsigned int* sorted_codes){
+    if (left == 0 || (right != primCount - 1 && fast_delta(right, right + 1, sorted_codes) < fast_delta(left - 1, left, sorted_codes)))
+			return right;
+		else
+			return left - 1;
 }
 
 static inline __device__ uint32_t find_nearest_neighbor(uint32_t numPrim, float2x3 cluster_bounds) {
