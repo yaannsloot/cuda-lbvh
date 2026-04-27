@@ -7,7 +7,6 @@
 #include <cub/device/device_radix_sort.cuh>
 #include <sutil/vec_math.h>
 
-
 // This is a copy of build.cu. Modify it to be faster.
 // Gets compiled to cuda-lbvh-fast
 
@@ -155,8 +154,8 @@ __forceinline__ __device__ int delta(int l, int r, unsigned int n, unsigned int 
     return __clz(kl ^ kr);
 }
 
-static __forceinline__ __device__ uint64_t fast_delta(unsigned int a, unsigned int b, unsigned int* morton_codes){
-    return ((uint64_t)morton_codes[a] << 32 | a)  ^ ((uint64_t)morton_codes[b] << 32 | b);
+static __forceinline__ __device__ uint64_t fast_delta(unsigned int a, unsigned int b, unsigned int *morton_codes) {
+    return ((uint64_t)morton_codes[a] << 32 | a) ^ ((uint64_t)morton_codes[b] << 32 | b);
 }
 
 // Load float3 at global level (cache in L2 and below, not L1).
@@ -342,7 +341,7 @@ static inline __device__ uint32_t merge_clusters(uint32_t n_prim, uint32_t neigh
 
     uint32_t valid_mask = __ballot_sync(FULL_MASK, can_merge || !has_mutual_lane);
     int32_t shift = __fns(valid_mask, 0, warp_id + 1);
-    
+
     cluster_index = __shfl_sync(FULL_MASK, cluster_index, shift);
     if (shift == -1)
         cluster_index = INVALID_IDX;
@@ -383,7 +382,7 @@ static inline __device__ void ploc_merge(unsigned int lane_id, uint32_t left, ui
     store_indicies(num_left + num_right, cluster_index, state, left_start);
 }
 
-__global__ void build_bvh(build_state state, uint32_t *morton_codes){
+__global__ void build_bvh(build_state state, uint32_t *morton_codes) {
     const uint32_t index = blockDim.x * blockIdx.x + threadIdx.x;
 
     uint32_t left = index;
@@ -393,34 +392,33 @@ __global__ void build_bvh(build_state state, uint32_t *morton_codes){
 
     bool lane_active = index < state.prim_count;
 
-    while(__ballot_sync(FULL_MASK, lane_active)){
+    while (__ballot_sync(FULL_MASK, lane_active)) {
 
-        if(lane_active){
+        if (lane_active) {
 
             uint32_t previous_id;
 
-            if(find_parent_id(left, right, state.prim_count, morton_codes) == right){
+            if (find_parent_id(left, right, state.prim_count, morton_codes) == right) {
 
                 previous_id = atomicExch(&state.parent_indicies[right], left);
 
-                if(previous_id != INVALID_IDX){
+                if (previous_id != INVALID_IDX) {
                     split = right + 1;
 
                     right = previous_id;
                 }
-            }
-            else {
+            } else {
 
                 previous_id = atomicExch(&state.parent_indicies[left - 1], right);
 
-                if(previous_id != INVALID_IDX){
+                if (previous_id != INVALID_IDX) {
                     split = left;
 
                     left = previous_id;
                 }
             }
 
-            if(previous_id == INVALID_IDX){
+            if (previous_id == INVALID_IDX) {
                 lane_active = false;
             }
         }
@@ -430,7 +428,7 @@ __global__ void build_bvh(build_state state, uint32_t *morton_codes){
 
         uint32_t warp_mask = __ballot_sync(FULL_MASK, lane_active && (size > MERGING_THRESHOLD) || final);
 
-        while (warp_mask){
+        while (warp_mask) {
             uint32_t lane_id = __ffs(warp_mask) - 1;
 
             ploc_merge(lane_id, left, right, split, final, state);
@@ -469,7 +467,7 @@ __global__ void initalize_nodes(
     leaf.child_r = -1;
     leaf.min = min;
     leaf.max = max;
-    leaf.parent = -1;
+    leaf.paren = -1;
 }
 
 struct kernel_timer {
@@ -598,23 +596,33 @@ bool build(const scene &s, bvh &bvh) {
     RETURN_IF_CUDA_ERR(sort(d_tmp.get_ptr(), num_tmp_bytes));
     t_sort.end();
 
+    buf_gpu<uint32_t> d_cluster_indicies;
+    buf_gpu<uint32_t> d_parent_indicies;
+    buf_gpu<uint32_t> d_cluster_count;
+    RETURN_IF_FALSE(d_cluster_indicies.resize(num_triangles));
+    RETURN_IF_FALSE(d_parent_indicies.resize(num_triangles));
+    RETURN_IF_FALSE(d_cluster_count.resize(1));
+
+    RETURN_IF_CUDA_ERR(cudaMemset(d_parent_indicies.get_ptr(), INVALID_IDX, num_triangles * sizeof(uint32_t)));
+    RETURN_IF_CUDA_ERR(cudaMemset(d_cluster_count.get_ptr(), 0, sizeof(uint32_t)));
+
     build_state state;
 
     state.prim_count = num_triangles;
-    state.nodes = &bvh.nodes;
-    state.cluster_indicies = CudaMemory::AllocAsync<uint32_t>(num_triangles); //allocate space n stuff
-    state.parent_indicies = CudaMemory::AllocAsync<uint32_t>(num_triangles); // same length as leaf nodes
-    state.cluster_count = num_triangles;
+    state.prim_count = num_triangles;
+    state.nodes = bvh.nodes.get_ptr();
+    state.cluster_indicies = d_cluster_indicies.get_ptr();
+    state.parent_indicies = d_parent_indicies.get_ptr();
+    state.cluster_count = d_cluster_count.get_ptr();
 
     // construct nodes
     t_init.begin();
     initalize_nodes<<<num_blocks, block_size>>>(
-        d_ids_sorted.get_ptr(), 
+        d_ids_sorted.get_ptr(),
         num_triangles,
-        bvh.positions.get_ptr(), 
+        bvh.positions.get_ptr(),
         bvh.pos_indices.get_ptr(),
-        state
-        );
+        state);
     t_init.end();
     RETURN_IF_CUDA_ERR(cudaGetLastError());
 
@@ -638,8 +646,7 @@ bool build(const scene &s, bvh &bvh) {
         num_triangles / seconds * 1e-6f);
     printf("  assign_morton:   %7.4f ms\n", t_morton.ms());
     printf("  radix_sort:      %7.4f ms\n", t_sort.ms());
-    printf("  leaf_nodes:      %7.4f ms\n", t_leaf.ms());
-    printf("  internal_nodes:  %7.4f ms\n", t_intrn.ms());
-    printf("  set_aabb:        %7.4f ms\n", t_aabb.ms());
+    printf("  init_nodes:      %7.4f ms\n", t_init.ms());
+    printf("  build:           %7.4f ms\n", t_build.ms());
     return true;
 }
