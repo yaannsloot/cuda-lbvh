@@ -330,7 +330,7 @@ static inline __device__ void ploc_merge(unsigned int lane_id, uint left, uint r
     store_indicies(num_left + num_right, cluster_index, state, left_start);
 }
 
-__global__ void build_bvh(build_state state, uint morton_codes){
+__global__ void build_bvh(build_state state, uint* morton_codes){
     const uint index = blockDim.x * blockIdx.x + threadIdx.x;
 
     uint left = index;
