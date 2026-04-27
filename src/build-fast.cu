@@ -10,6 +10,15 @@
 // This is a copy of build.cu. Modify it to be faster.
 // Gets compiled to cuda-lbvh-fast
 
+struct build_state{
+
+    bvh_node* nodes;
+    uint* cluster_indicies;
+    uint* parent_indicies;
+    uint prim_count;
+    uint cluster_count;
+}
+
 struct float2x3 {
     float3 bounds[2];
 
@@ -196,8 +205,6 @@ __global__ void leaf_nodes(
         return;
     internal_nodes[thread_id].paren = -1;
 }
-
-
 
 __forceinline__ __device__ int delta(int l, int r, unsigned int n, unsigned int *c, unsigned int kl) {
     // this guard is for leaf nodes, not internal nodes (hence [0, n-1])
@@ -395,7 +402,35 @@ __device__ uint2 shfl_sync_uint2(unsigned int mask, uint2 value, int src_lane) {
         __shfl_sync(mask, value.y, src_lane));
 }
 
-static ___forceinline__ __device__ uint find_parent__id(unsigned int left, unsigned int right, unsigned int primCount, unsigned int* sorted_codes){
+static  __forceinline__ __device__ uint32_t load_indices(uint32_t start, uint32_t end, uint32_t& cluster_index, build_state state, uint32_t offset){
+   
+    uint lane_warp_index = threadIdx.x & (WARP_SIZE - 1);
+
+    uint index = lane_warp_index - offset;
+    bool valid_id = index < min(end - start, MERGING_THRESHOLD);
+
+    if (valid_id){
+        cluster_index = state.cluster_indicies[start + index];
+    }
+
+    uint valid_cluster_num = __popc(__ballot_sync(FULL_MASK, valid_id && cluster_index != INVALID_IDX));
+
+    return valid_cluster_num;
+}
+
+static ___forceinline__ __device__ void store_indicies(uint previous_prim, uint cluster_index, build_state state, uint left_start){
+    
+    uint lane_warp_index = threadIdx.x & (WARP_SIZE - 1);
+
+    if(lane_warp_index < previous_prim){
+        state.cluster_indicies[left_start + lane_warp_index] = cluster_index;
+    }
+
+    __threadfence();
+
+}
+
+static ___forceinline__ __device__ uint find_parent_id(unsigned int left, unsigned int right, unsigned int primCount, unsigned int* sorted_codes){
     if (left == 0 || (right != primCount - 1 && fast_delta(right, right + 1, sorted_codes) < fast_delta(left - 1, left, sorted_codes)))
 			return right;
 		else
@@ -440,6 +475,37 @@ static inline __device__ uint32_t find_nearest_neighbor(uint32_t numPrim, float2
     }
 
     return min_area_index.y;
+}
+
+static inline __device__ void ploc_merge(unsigned int lane_id, uint left, uint right, uint split, bool final, build_state state){
+
+    uint left_start = __shfl_sync(FULL_MASK, left, lane_id);
+    uint right_end = __shfl_sync(FULL_MASK, right, lane_id) + 1;
+    uint left_end = __shfl_sync(FULL_MASK, split, lane_id);
+    uint right_start = left_end + 1;
+
+    uint lane_warp_index = threadIdx.x & (WARP_SIZE - 1);
+
+    uint cluster_index = INVALID_IDX;
+
+    uint num_left = load_indicies(left_start, left_end, cluster_index, state, 0);
+    uint num_right = load_indicies(right_start, right_end, cluster_index, state, num_left);
+    uint numPrim = num_left + num_right;
+
+    float2x3 cluster_bounds;
+
+    if(lane_warp_index < numPrim){
+        cluster_bounds = make_bounds(state.nodes[cluster_index].min, state.nodes[cluster_index].max);
+    }
+
+    uint threshold = __shfl_sync(FULL_MASK, final, lane_id) ? 1: MERGING_THRESHOLD;
+
+    while(numPrim > threshold){
+        uint nearest_neighbor = find_nearest_neighbor(numPrim, cluster_bounds);
+        numPrim = mergeClusterFunc(); //put your function here yaan
+    }
+
+    store_indicies(num_left + num_right, cluster_index, state, left_start);
 }
 
 __device__ cluster make_cluster_from_leaf(int node_idx, float3 min, float3 max) {
