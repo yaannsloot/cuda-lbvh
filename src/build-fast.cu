@@ -224,7 +224,7 @@ __device__ uint2 shfl_sync_uint2(unsigned int mask, uint2 value, int src_lane) {
         __shfl_sync(mask, value.y, src_lane));
 }
 
-static __forceinline__ __device__ uint32_t load_indices(uint32_t start, uint32_t end, uint32_t &cluster_index, build_state state, uint32_t offset) {
+static __forceinline__ __device__ uint32_t load_indices(uint32_t start, uint32_t end, uint32_t &cluster_index, build_state &state, uint32_t offset) {
 
     uint32_t lane_warp_index = threadIdx.x & (WARP_SIZE - 1);
 
@@ -240,7 +240,7 @@ static __forceinline__ __device__ uint32_t load_indices(uint32_t start, uint32_t
     return valid_cluster_num;
 }
 
-static __forceinline__ __device__ void store_indicies(uint32_t previous_prim, uint32_t cluster_index, build_state state, uint32_t left_start) {
+static __forceinline__ __device__ void store_indicies(uint32_t previous_prim, uint32_t cluster_index, build_state &state, uint32_t left_start) {
 
     uint32_t lane_warp_index = threadIdx.x & (WARP_SIZE - 1);
 
@@ -298,7 +298,7 @@ static inline __device__ uint32_t find_nearest_neighbor(uint32_t numPrim, float2
     return min_area_index.y;
 }
 
-static inline __device__ uint32_t merge_clusters(uint32_t n_prim, uint32_t neighbor, uint32_t &cluster_index, float2x3 &cluster_bounds, build_state *state) {
+static inline __device__ uint32_t merge_clusters(uint32_t n_prim, uint32_t neighbor, uint32_t &cluster_index, float2x3 &cluster_bounds, build_state &state) {
 
     uint32_t warp_id = threadIdx.x & (WARP_SIZE - 1);
 
@@ -313,7 +313,7 @@ static inline __device__ uint32_t merge_clusters(uint32_t n_prim, uint32_t neigh
 
     uint32_t global_base_idx;
     if (warp_id == 0)
-        global_base_idx = atomicAdd(&state->cluster_count, new_nodes);
+        global_base_idx = atomicAdd(state.cluster_count, new_nodes);
 
     global_base_idx = __shfl_sync(FULL_MASK, global_base_idx, 0);
 
@@ -326,7 +326,7 @@ static inline __device__ uint32_t merge_clusters(uint32_t n_prim, uint32_t neigh
         cluster_bounds = grow(cluster_bounds, neighbor_bounds);
         uint32_t new_idx = global_base_idx + relative_idx;
 
-        bvh_node *node = &state->nodes[new_idx];
+        bvh_node *node = &state.nodes[new_idx];
         node->child_l = cluster_index;
         node->child_r = neighbor_cluster_index;
         node->min = cluster_bounds[0];
@@ -334,8 +334,8 @@ static inline __device__ uint32_t merge_clusters(uint32_t n_prim, uint32_t neigh
         node->visited = 0;
         node->paren = -1;
 
-        state->nodes[cluster_index].paren = new_idx;
-        state->nodes[neighbor_cluster_index].paren = new_idx;
+        state.nodes[cluster_index].paren = new_idx;
+        state.nodes[neighbor_cluster_index].paren = new_idx;
 
         cluster_index = new_idx;
     }
@@ -352,7 +352,7 @@ static inline __device__ uint32_t merge_clusters(uint32_t n_prim, uint32_t neigh
     return n_prim - new_nodes;
 }
 
-static inline __device__ void ploc_merge(unsigned int lane_id, uint32_t left, uint32_t right, uint32_t split, bool final, build_state state) {
+static inline __device__ void ploc_merge(unsigned int lane_id, uint32_t left, uint32_t right, uint32_t split, bool final, build_state &state) {
 
     uint32_t left_start = __shfl_sync(FULL_MASK, left, lane_id);
     uint32_t right_end = __shfl_sync(FULL_MASK, right, lane_id) + 1;
@@ -377,19 +377,19 @@ static inline __device__ void ploc_merge(unsigned int lane_id, uint32_t left, ui
 
     while (numPrim > threshold) {
         uint32_t nearest_neighbor = find_nearest_neighbor(numPrim, cluster_bounds);
-        // numPrim = merge_clusters(numPrim, nearest_neighbor, ); //put your function here yaan
+        numPrim = merge_clusters(numPrim, nearest_neighbor, cluster_index, cluster_bounds, state);
     }
 
     store_indicies(num_left + num_right, cluster_index, state, left_start);
 }
 
-__global__ void build_bvh(build_state state, uint* morton_codes){
-    const uint index = blockDim.x * blockIdx.x + threadIdx.x;
+__global__ void build_bvh(build_state state, uint32_t *morton_codes){
+    const uint32_t index = blockDim.x * blockIdx.x + threadIdx.x;
 
-    uint left = index;
-    uint right = index;
+    uint32_t left = index;
+    uint32_t right = index;
 
-    uint split = 0;
+    uint32_t split = 0;
 
     bool lane_active = index < state.prim_count;
 
@@ -397,11 +397,11 @@ __global__ void build_bvh(build_state state, uint* morton_codes){
 
         if(lane_active){
 
-            uint previous_id;
+            uint32_t previous_id;
 
             if(find_parent_id(left, right, state.prim_count, morton_codes) == right){
 
-                previous_id = atomicExch(&state.nodes[right].paren, left);
+                previous_id = atomicExch(&state.parent_indicies[right], left);
 
                 if(previous_id != INVALID_IDX){
                     split = right + 1;
@@ -411,7 +411,7 @@ __global__ void build_bvh(build_state state, uint* morton_codes){
             }
             else {
 
-                previous_id = atomicExch(&state.nodes[left - 1].paren, right);
+                previous_id = atomicExch(&state.parent_indicies[left - 1], right);
 
                 if(previous_id != INVALID_IDX){
                     split = left;
@@ -425,15 +425,15 @@ __global__ void build_bvh(build_state state, uint* morton_codes){
             }
         }
 
-        uint = right - left + 1;
+        uint32_t size = right - left + 1;
         bool final = lane_active && size == state.prim_count;
 
-        uint warp_mask = __ballot_sync(FULL_MASK, lane_active && (size > MERGING_THRESHOLD) || final);
+        uint32_t warp_mask = __ballot_sync(FULL_MASK, lane_active && (size > MERGING_THRESHOLD) || final);
 
-        while (warpMask){
-            uint lane_id = __ffs(warp_mask) - 1;
+        while (warp_mask){
+            uint32_t lane_id = __ffs(warp_mask) - 1;
 
-            plock_merge(lane_id, left, right, split, final, state);
+            ploc_merge(lane_id, left, right, split, final, state);
 
             warp_mask = warp_mask & (warp_mask - 1);
         }
