@@ -72,8 +72,7 @@ struct bvh {
 struct build_state{
 
     bvh_node* nodes;
-    uint* cluster_indicies;
-    uint* parent_indicies;
-    uint prim_count;
-    uint cluster_count;
+    uint32_t* cluster_indicies;
+    uint32_t prim_count;
+    uint32_t cluster_count;
 };
