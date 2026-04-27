@@ -68,6 +68,11 @@ struct bvh {
 };
 
 //empty for now but will be needed later
-struct build_state {
-    
+struct build_state{
+
+    bvh_node* nodes;
+    uint32_t* cluster_indicies;
+    uint32_t* parent_indicies;
+    uint32_t prim_count;
+    uint32_t cluster_count;
 };

@@ -10,20 +10,13 @@
 // This is a copy of build.cu. Modify it to be faster.
 // Gets compiled to cuda-lbvh-fast
 
-struct build_state{
-
-    bvh_node* nodes;
-    uint* cluster_indicies;
-    uint* parent_indicies;
-    uint prim_count;
-    uint cluster_count;
-}
+#define MERGING_THRESHOLD 16
 
 struct float2x3 {
     float3 bounds[2];
 
-    __host__ __device__ float3& operator[](int i) { return bounds[i]; }
-    __host__ __device__ const float3& operator[](int i) const { return bounds[i]; }
+    __host__ __device__ float3 &operator[](int i) { return bounds[i]; }
+    __host__ __device__ const float3 &operator[](int i) const { return bounds[i]; }
 };
 
 struct cluster {
@@ -93,53 +86,51 @@ __device__ int get_leaf_node_idx(int i, int num_triangles) { return num_triangle
 __device__ int get_internal_node_idx(int i) { return i; }
 
 /// Expands a 10-bit integer into 30 bits by inserting 2 zeros after each bit.
-__forceinline__ __device__ unsigned int expand_bits(unsigned int v)
-{
-   /* Comments generated with Python from https://stackoverflow.com/questions/18529057/produce-interleaving-bit-patterns-morton-keys-for-32-bit-64-bit-and-128bit */
+__forceinline__ __device__ unsigned int expand_bits(unsigned int v) {
+    /* Comments generated with Python from https://stackoverflow.com/questions/18529057/produce-interleaving-bit-patterns-morton-keys-for-32-bit-64-bit-and-128bit */
 
-		/*
-		 * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 1111 1111
-		 * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000  hex: 0x300
-		 * Shifted part (<< 16):   0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 0000 0000  hex: 0x3000000
-		 * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1111 1111  hex: 0xff
-		 * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 1111 1111  hex: 0x30000ff
-		 */
-		v = (v | (v << 16)) & 0x30000ff;
+    /*
+     * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 1111 1111
+     * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000  hex: 0x300
+     * Shifted part (<< 16):   0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 0000 0000  hex: 0x3000000
+     * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1111 1111  hex: 0xff
+     * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 1111 1111  hex: 0x30000ff
+     */
+    v = (v | (v << 16)) & 0x30000ff;
 
-		/*
-		 * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 1111 1111
-		 * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1111 0000  hex: 0xf0
-		 * Shifted part (<< 8):    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1111 0000 0000 0000  hex: 0xf000
-		 * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 0000 1111  hex: 0x300000f
-		 * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 1111 0000 0000 1111  hex: 0x300f00f
-		 */
-		v = (v | (v << 8)) & 0x300f00f;
+    /*
+     * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 1111 1111
+     * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1111 0000  hex: 0xf0
+     * Shifted part (<< 8):    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1111 0000 0000 0000  hex: 0xf000
+     * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 0000 1111  hex: 0x300000f
+     * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 1111 0000 0000 1111  hex: 0x300f00f
+     */
+    v = (v | (v << 8)) & 0x300f00f;
 
-		/*
-		 * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 1111 0000 0000 1111
-		 * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1100 0000 0000 1100  hex: 0xc00c
-		 * Shifted part (<< 4):    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1100 0000 0000 1100 0000  hex: 0xc00c0
-		 * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0011 0000 0000 0011  hex: 0x3003003
-		 * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 1100 0011 0000 1100 0011  hex: 0x30c30c3
-		 */
-		v = (v | (v << 4)) & 0x30c30c3;
+    /*
+     * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 1111 0000 0000 1111
+     * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1100 0000 0000 1100  hex: 0xc00c
+     * Shifted part (<< 4):    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1100 0000 0000 1100 0000  hex: 0xc00c0
+     * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0011 0000 0000 0011  hex: 0x3003003
+     * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 1100 0011 0000 1100 0011  hex: 0x30c30c3
+     */
+    v = (v | (v << 4)) & 0x30c30c3;
 
-		/*
-		 * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 1100 0011 0000 1100 0011
-		 * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0010 0000 1000 0010 0000 1000 0010  hex: 0x2082082
-		 * Shifted part (<< 2):    0000 0000 0000 0000 0000 0000 0000 0000 0000 1000 0010 0000 1000 0010 0000 1000  hex: 0x8208208
-		 * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0001 0000 0100 0001 0000 0100 0001  hex: 0x1041041
-		 * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 1001 0010 0100 1001 0010 0100 1001  hex: 0x9249249
-		 */
-		v = (v | (v << 2)) & 0x9249249;
+    /*
+     * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 1100 0011 0000 1100 0011
+     * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0010 0000 1000 0010 0000 1000 0010  hex: 0x2082082
+     * Shifted part (<< 2):    0000 0000 0000 0000 0000 0000 0000 0000 0000 1000 0010 0000 1000 0010 0000 1000  hex: 0x8208208
+     * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0001 0000 0100 0001 0000 0100 0001  hex: 0x1041041
+     * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 1001 0010 0100 1001 0010 0100 1001  hex: 0x9249249
+     */
+    v = (v | (v << 2)) & 0x9249249;
 
-		return v;
+    return v;
 }
 
 /// Calculates a 30-bit Morton code for the given 3D point located
 /// within the unit cube [0,1].
-__forceinline__ __device__ unsigned int morton_3d(float x, float y, float z)
-{
+__forceinline__ __device__ unsigned int morton_3d(float x, float y, float z) {
     return expand_bits(x) | expand_bits(y) << 1 | expand_bits(z) << 2;
 }
 
@@ -220,8 +211,8 @@ __forceinline__ __device__ int delta(int l, int r, unsigned int n, unsigned int 
     return __clz(kl ^ kr);
 }
 
-static ___forceinline__ __device__ uint fast_delta(unsigned int a, unsigned int b, unsigned int* morton_codes){
-    return (mortonCodes[a] << 32 | a)  ^ (mortonCodes[b] << 32 | b);
+static __forceinline__ __device__ uint64_t fast_delta(unsigned int a, unsigned int b, unsigned int *morton_codes) {
+    return ((uint64_t)morton_codes[a] << 32 | a) ^ ((uint64_t)morton_codes[b] << 32 | b);
 }
 
 __forceinline__ __device__ int2
@@ -336,7 +327,6 @@ __global__ void internal_nodes(
     nodes[child_r].paren = get_internal_node_idx(thread_id);
 }
 
-
 // Load float3 at global level (cache in L2 and below, not L1).
 __device__ float3 __ldcg(const float3 *p) {
     return make_float3(__ldcg(&(p->x)), __ldcg(&(p->y)), __ldcg(&(p->z)));
@@ -402,43 +392,42 @@ __device__ uint2 shfl_sync_uint2(unsigned int mask, uint2 value, int src_lane) {
         __shfl_sync(mask, value.y, src_lane));
 }
 
-static  __forceinline__ __device__ uint32_t load_indices(uint32_t start, uint32_t end, uint32_t& cluster_index, build_state state, uint32_t offset){
-   
-    uint lane_warp_index = threadIdx.x & (WARP_SIZE - 1);
+static __forceinline__ __device__ uint32_t load_indices(uint32_t start, uint32_t end, uint32_t &cluster_index, build_state state, uint32_t offset) {
 
-    uint index = lane_warp_index - offset;
+    uint32_t lane_warp_index = threadIdx.x & (WARP_SIZE - 1);
+
+    uint32_t index = lane_warp_index - offset;
     bool valid_id = index < min(end - start, MERGING_THRESHOLD);
 
-    if (valid_id){
+    if (valid_id) {
         cluster_index = state.cluster_indicies[start + index];
     }
 
-    uint valid_cluster_num = __popc(__ballot_sync(FULL_MASK, valid_id && cluster_index != INVALID_IDX));
+    uint32_t valid_cluster_num = __popc(__ballot_sync(FULL_MASK, valid_id && cluster_index != INVALID_IDX));
 
     return valid_cluster_num;
 }
 
-static ___forceinline__ __device__ void store_indicies(uint previous_prim, uint cluster_index, build_state state, uint left_start){
-    
-    uint lane_warp_index = threadIdx.x & (WARP_SIZE - 1);
+static __forceinline__ __device__ void store_indicies(uint32_t previous_prim, uint32_t cluster_index, build_state state, uint32_t left_start) {
 
-    if(lane_warp_index < previous_prim){
+    uint32_t lane_warp_index = threadIdx.x & (WARP_SIZE - 1);
+
+    if (lane_warp_index < previous_prim) {
         state.cluster_indicies[left_start + lane_warp_index] = cluster_index;
     }
 
     __threadfence();
-
 }
 
-static ___forceinline__ __device__ uint find_parent_id(unsigned int left, unsigned int right, unsigned int primCount, unsigned int* sorted_codes){
+static __forceinline__ __device__ uint32_t find_parent_id(unsigned int left, unsigned int right, unsigned int primCount, unsigned int *sorted_codes) {
     if (left == 0 || (right != primCount - 1 && fast_delta(right, right + 1, sorted_codes) < fast_delta(left - 1, left, sorted_codes)))
-			return right;
-		else
-			return left - 1;
+        return right;
+    else
+        return left - 1;
 }
 
 static inline __device__ uint32_t find_nearest_neighbor(uint32_t numPrim, float2x3 cluster_bounds) {
-    
+
     uint32_t warp_id = threadIdx.x & (WARP_SIZE - 1);
 
     uint2 min_area_index = make_uint2(INVALID_IDX, INVALID_IDX);
@@ -477,32 +466,86 @@ static inline __device__ uint32_t find_nearest_neighbor(uint32_t numPrim, float2
     return min_area_index.y;
 }
 
-static inline __device__ void ploc_merge(unsigned int lane_id, uint left, uint right, uint split, bool final, build_state state){
+static inline __device__ uint32_t merge_clusters(uint32_t n_prim, uint32_t neighbor, uint32_t &cluster_index, float2x3 &cluster_bounds, build_state *state) {
 
-    uint left_start = __shfl_sync(FULL_MASK, left, lane_id);
-    uint right_end = __shfl_sync(FULL_MASK, right, lane_id) + 1;
-    uint left_end = __shfl_sync(FULL_MASK, split, lane_id);
-    uint right_start = left_end + 1;
+    uint32_t warp_id = threadIdx.x & (WARP_SIZE - 1);
 
-    uint lane_warp_index = threadIdx.x & (WARP_SIZE - 1);
+    bool active = warp_id < n_prim;
 
-    uint cluster_index = INVALID_IDX;
+    uint32_t neighbor_warp_id = __shfl_sync(FULL_MASK, neighbor, neighbor);
+    bool has_mutual_lane = active && warp_id == neighbor_warp_id;
+    bool can_merge = has_mutual_lane && warp_id < neighbor;
 
-    uint num_left = load_indicies(left_start, left_end, cluster_index, state, 0);
-    uint num_right = load_indicies(right_start, right_end, cluster_index, state, num_left);
-    uint numPrim = num_left + num_right;
+    uint32_t merge_mask = __ballot_sync(FULL_MASK, can_merge);
+    uint32_t new_nodes = __popc(merge_mask);
+
+    uint32_t global_base_idx;
+    if (warp_id == 0)
+        global_base_idx = atomicAdd(&state->cluster_count, new_nodes);
+
+    global_base_idx = __shfl_sync(FULL_MASK, global_base_idx, 0);
+
+    uint32_t relative_idx = __popc(merge_mask << (WARP_SIZE - warp_id));
+
+    uint32_t neighbor_cluster_index = __shfl_sync(FULL_MASK, cluster_index, neighbor);
+    float2x3 neighbor_bounds = shfl_sync_float2x3(FULL_MASK, cluster_bounds, neighbor);
+
+    if (can_merge) {
+        cluster_bounds = grow(cluster_bounds, neighbor_bounds);
+        uint32_t new_idx = global_base_idx + relative_idx;
+
+        bvh_node *node = &state->nodes[new_idx];
+        node->child_l = cluster_index;
+        node->child_r = neighbor_cluster_index;
+        node->min = cluster_bounds[0];
+        node->max = cluster_bounds[1];
+        node->visited = 0;
+        node->paren = -1;
+
+        state->nodes[cluster_index].paren = new_idx;
+        state->nodes[neighbor_cluster_index].paren = new_idx;
+
+        cluster_index = new_idx;
+    }
+
+    uint32_t valid_mask = __ballot_sync(FULL_MASK, can_merge || !has_mutual_lane);
+    int32_t shift = __fns(valid_mask, 0, warp_id + 1);
+    
+    cluster_index = __shfl_sync(FULL_MASK, cluster_index, shift);
+    if (shift == -1)
+        cluster_index = INVALID_IDX;
+
+    cluster_bounds = shfl_sync_float2x3(FULL_MASK, cluster_bounds, shift);
+
+    return n_prim - new_nodes;
+}
+
+static inline __device__ void ploc_merge(unsigned int lane_id, uint32_t left, uint32_t right, uint32_t split, bool final, build_state state) {
+
+    uint32_t left_start = __shfl_sync(FULL_MASK, left, lane_id);
+    uint32_t right_end = __shfl_sync(FULL_MASK, right, lane_id) + 1;
+    uint32_t left_end = __shfl_sync(FULL_MASK, split, lane_id);
+    uint32_t right_start = left_end + 1;
+
+    uint32_t lane_warp_index = threadIdx.x & (WARP_SIZE - 1);
+
+    uint32_t cluster_index = INVALID_IDX;
+
+    uint32_t num_left = load_indices(left_start, left_end, cluster_index, state, 0);
+    uint32_t num_right = load_indices(right_start, right_end, cluster_index, state, num_left);
+    uint32_t numPrim = num_left + num_right;
 
     float2x3 cluster_bounds;
 
-    if(lane_warp_index < numPrim){
+    if (lane_warp_index < numPrim) {
         cluster_bounds = make_bounds(state.nodes[cluster_index].min, state.nodes[cluster_index].max);
     }
 
-    uint threshold = __shfl_sync(FULL_MASK, final, lane_id) ? 1: MERGING_THRESHOLD;
+    uint32_t threshold = __shfl_sync(FULL_MASK, final, lane_id) ? 1 : MERGING_THRESHOLD;
 
-    while(numPrim > threshold){
-        uint nearest_neighbor = find_nearest_neighbor(numPrim, cluster_bounds);
-        numPrim = mergeClusterFunc(); //put your function here yaan
+    while (numPrim > threshold) {
+        uint32_t nearest_neighbor = find_nearest_neighbor(numPrim, cluster_bounds);
+        // numPrim = merge_clusters(numPrim, nearest_neighbor, ); //put your function here yaan
     }
 
     store_indicies(num_left + num_right, cluster_index, state, left_start);
@@ -759,10 +802,10 @@ bool build(const scene &s, bvh &bvh) {
     const int num_blocks = ceiling_div(num_triangles, static_cast<unsigned int>(block_size));
 
     kernel_timer t_morton("assign_morton");
-    kernel_timer t_sort  ("radix_sort"); // Don't think we'll be messing with this one
-    kernel_timer t_leaf  ("leaf_nodes");
-    kernel_timer t_intrn ("internal_nodes");
-    kernel_timer t_aabb  ("set_aabb");
+    kernel_timer t_sort("radix_sort"); // Don't think we'll be messing with this one
+    kernel_timer t_leaf("leaf_nodes");
+    kernel_timer t_intrn("internal_nodes");
+    kernel_timer t_aabb("set_aabb");
 
     t_morton.begin();
     assign_morton<<<num_blocks, block_size>>>(
@@ -812,7 +855,7 @@ bool build(const scene &s, bvh &bvh) {
     printf(
         "(fast) building took %6.5fms, %6.2f million triangles per second\n",
         milliseconds,
-        num_triangles / seconds * 1e-6f);    
+        num_triangles / seconds * 1e-6f);
     printf("  assign_morton:   %7.4f ms\n", t_morton.ms());
     printf("  radix_sort:      %7.4f ms\n", t_sort.ms());
     printf("  leaf_nodes:      %7.4f ms\n", t_leaf.ms());
