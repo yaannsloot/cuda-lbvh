@@ -440,22 +440,13 @@ __global__ void build_bvh(build_state state, uint* morton_codes){
     }
 }
 
-__device__ cluster make_cluster_from_leaf(int node_idx, float3 min, float3 max) {
-    cluster c;
-    c.node_idx = node_idx;
-    c.min = min;
-    c.max = max;
-    c.active = 1;
-    return c;
-}
-
-__global__ void make_clusters(
+__global__ void initalize_nodes(
     unsigned int *sorted_object_ids,
     unsigned int num_objects,
     const float3 *positions,
     const int *pos_indices,
-    bvh_node *nodes,
-    cluster *clusters) {
+    build_state state) {
+
     const unsigned int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (thread_id >= num_objects)
         return;
@@ -472,46 +463,13 @@ __global__ void make_clusters(
     const float3 max = fmaxf(u, fmaxf(v, w));
 
     const int leaf_node_idx = get_leaf_node_idx(thread_id, num_objects);
-    bvh_node &leaf = nodes[leaf_node_idx];
+    bvh_node &leaf = state.nodes[leaf_node_idx];
     leaf.object_id = object_id;
     leaf.child_l = -1;
     leaf.child_r = -1;
     leaf.min = min;
     leaf.max = max;
-
-    clusters[thread_id] = make_cluster_from_leaf(leaf_node_idx, min, max);
-
-    if (thread_id < num_objects - 1)
-        nodes[thread_id].paren = -1;
-}
-
-__device__ cluster merge_clusters_to_node(
-    const cluster &left,
-    const cluster &right,
-    bvh_node *nodes,
-    int new_node_idx) {
-    cluster parent;
-    parent.node_idx = new_node_idx;
-    parent.min = fminf(left.min, right.min);
-    parent.max = fmaxf(left.max, right.max);
-    parent.active = 1;
-
-    bvh_node &node = nodes[new_node_idx];
-    node.child_l = left.node_idx;
-    node.child_r = right.node_idx;
-    node.paren = -1;
-    node.min = parent.min;
-    node.max = parent.max;
-    node.visited = 0;
-
-    nodes[left.node_idx].paren = new_node_idx;
-    nodes[right.node_idx].paren = new_node_idx;
-
-    return parent;
-}
-
-__device__ bool is_active_cluster(const cluster &c) {
-    return c.active != 0 && c.node_idx != -1;
+    leaf.parent = -1;
 }
 
 struct kernel_timer {
@@ -619,9 +577,8 @@ bool build(const scene &s, bvh &bvh) {
 
     kernel_timer t_morton("assign_morton");
     kernel_timer t_sort("radix_sort"); // Don't think we'll be messing with this one
-    kernel_timer t_leaf("leaf_nodes");
-    kernel_timer t_intrn("internal_nodes");
-    kernel_timer t_aabb("set_aabb");
+    kernel_timer t_init("initalize_nodes");
+    kernel_timer t_build("hploc build");
 
     t_morton.begin();
     assign_morton<<<num_blocks, block_size>>>(
@@ -643,30 +600,30 @@ bool build(const scene &s, bvh &bvh) {
 
     build_state state;
 
-    state.nodes = &bvh.nodes;
-    state.cluster_indicies; //allocate space n stuff
     state.prim_count = num_triangles;
-    state.cluster_count = 0;
+    state.nodes = &bvh.nodes;
+    state.cluster_indicies = CudaMemory::AllocAsync<uint32_t>(num_triangles); //allocate space n stuff
+    state.parent_indicies = CudaMemory::AllocAsync<uint32_t>(num_triangles); // same length as leaf nodes
+    state.cluster_count = num_triangles;
 
-    // construct leaf nodes
-    t_leaf.begin();
-    leaf_nodes<<<num_blocks, block_size>>>(
-        d_ids_sorted.get_ptr(), num_triangles, bvh.nodes.get_ptr());
-    t_leaf.end();
+    // construct nodes
+    t_init.begin();
+    initalize_nodes<<<num_blocks, block_size>>>(
+        d_ids_sorted.get_ptr(), 
+        num_triangles,
+        bvh.positions.get_ptr(), 
+        bvh.pos_indices.get_ptr(),
+        state
+        );
+    t_init.end();
     RETURN_IF_CUDA_ERR(cudaGetLastError());
 
-    // construct internal nodes
-    t_intrn.begin();
-    internal_nodes<<<num_blocks, block_size>>>(
-        d_morton_sorted.get_ptr(), d_ids_sorted.get_ptr(), num_triangles, bvh.nodes.get_ptr());
-    t_intrn.end();
-    RETURN_IF_CUDA_ERR(cudaGetLastError());
-
-    // calculate bounding boxes by walking the hierarchy toward the root
-    t_aabb.begin();
-    set_aabb<<<num_blocks, block_size>>>(
-        num_triangles, bvh.nodes.get_ptr(), bvh.positions.get_ptr(), bvh.pos_indices.get_ptr());
-    t_aabb.end();
+    // construct bvh
+    t_build.begin();
+    build_bvh<<<num_blocks, block_size>>>(
+        state,
+        d_morton_sorted.get_ptr());
+    t_build.end();
     RETURN_IF_CUDA_ERR(cudaGetLastError());
 
     // print elapsed time
