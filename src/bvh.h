@@ -25,7 +25,8 @@
 #define WARP_SIZE 32
 #define FULL_MASK 0xFFFFFFFF
 #define INVALID_IDX 0xFFFFFFFF
-#define SEARCH_RADIUS 16
+#define SEARCH_RADIUS 8
+#define MERGING_THRESHOLD 16
 
 struct hit {
     float3 hitpoint;
@@ -68,6 +69,11 @@ struct bvh {
 };
 
 //empty for now but will be needed later
-struct build_state {
-    
+struct build_state{
+
+    buf_gpu<bvh_node> nodes;
+    uint* cluster_indicies;
+    uint* parent_indicies;
+    uint prim_count;
+    uint cluster_count;
 };
