@@ -25,7 +25,8 @@
 #define WARP_SIZE 32
 #define FULL_MASK 0xFFFFFFFF
 #define INVALID_IDX 0xFFFFFFFF
-#define SEARCH_RADIUS 16
+#define SEARCH_RADIUS 8
+#define MERGING_THRESHOLD 16
 
 struct hit {
     float3 hitpoint;

@@ -7,6 +7,7 @@
 #include <cub/device/device_radix_sort.cuh>
 #include <sutil/vec_math.h>
 
+
 // This is a copy of build.cu. Modify it to be faster.
 // Gets compiled to cuda-lbvh-fast
 
@@ -30,56 +31,6 @@ struct cluster {
  * ie insert two zeroes between every of the first 10 bits of x
  * \param x Quantitized position, must be between 0 and 2^10 - 1 = 1023
  */
-__device__ __forceinline__ uint32_t InterleaveBits32(uint32_t x) {
-    /* Comments generated with Python from https://stackoverflow.com/questions/18529057/produce-interleaving-bit-patterns-morton-keys-for-32-bit-64-bit-and-128bit */
-
-    /*
-     * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 1111 1111
-     * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000  hex: 0x300
-     * Shifted part (<< 16):   0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 0000 0000  hex: 0x3000000
-     * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1111 1111  hex: 0xff
-     * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 1111 1111  hex: 0x30000ff
-     */
-    x = (x | (x << 16)) & 0x30000ff;
-
-    /*
-     * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 1111 1111
-     * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1111 0000  hex: 0xf0
-     * Shifted part (<< 8):    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1111 0000 0000 0000  hex: 0xf000
-     * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0000 0000 0000 1111  hex: 0x300000f
-     * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 1111 0000 0000 1111  hex: 0x300f00f
-     */
-    x = (x | (x << 8)) & 0x300f00f;
-
-    /*
-     * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 1111 0000 0000 1111
-     * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1100 0000 0000 1100  hex: 0xc00c
-     * Shifted part (<< 4):    0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 1100 0000 0000 1100 0000  hex: 0xc00c0
-     * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 0000 0011 0000 0000 0011  hex: 0x3003003
-     * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 1100 0011 0000 1100 0011  hex: 0x30c30c3
-     */
-    x = (x | (x << 4)) & 0x30c30c3;
-
-    /*
-     * Current Mask:           0000 0000 0000 0000 0000 0000 0000 0000 0000 0011 0000 1100 0011 0000 1100 0011
-     * Which bits to shift:    0000 0000 0000 0000 0000 0000 0000 0000 0000 0010 0000 1000 0010 0000 1000 0010  hex: 0x2082082
-     * Shifted part (<< 2):    0000 0000 0000 0000 0000 0000 0000 0000 0000 1000 0010 0000 1000 0010 0000 1000  hex: 0x8208208
-     * NonShifted Part:        0000 0000 0000 0000 0000 0000 0000 0000 0000 0001 0000 0100 0001 0000 0100 0001  hex: 0x1041041
-     * Bitmask is now :        0000 0000 0000 0000 0000 0000 0000 0000 0000 1001 0010 0100 1001 0010 0100 1001  hex: 0x9249249
-     */
-    x = (x | (x << 2)) & 0x9249249;
-
-    return x;
-}
-
-/* \brief Compute a 32-bit Morton code for the given quantitized 3D point
- * \param x The quantitized x coordinate
- * \param y The quantitized y coordinate
- * \param z The quantitized z coordinate
- */
-__device__ __forceinline__ uint32_t MortonCode32(uint32_t x, uint32_t y, uint32_t z) {
-    return InterleaveBits32(x) | InterleaveBits32(y) << 1 | InterleaveBits32(z) << 2;
-}
 
 __device__ int get_leaf_node_idx(int i, int num_triangles) { return num_triangles - 1 + i; }
 
@@ -163,14 +114,7 @@ __global__ void assign_morton(
     z = fclampf(z, 0.f, 1.f);
 
     // obtain and set morton code based on normalized position
-    // d_morton[thread_id] = morton_3d(x, y, z);
-
-    // Comment this and uncomment above if you don't notice any improvement
-    uint32_t qx = (uint32_t)fclampf(x * 1024.f, 0.f, 1023.f);
-    uint32_t qy = (uint32_t)fclampf(y * 1024.f, 0.f, 1023.f);
-    uint32_t qz = (uint32_t)fclampf(z * 1024.f, 0.f, 1023.f);
-    d_morton[thread_id] = MortonCode32(qx, qy, qz);
-    // Ends here
+    d_morton[thread_id] = morton_3d(x, y, z);
 
     d_ids[thread_id] = thread_id;
 }
@@ -187,7 +131,7 @@ __global__ void leaf_nodes(
 
     // no need to set parent to nullptr, each child will have a parent
     leaf_nodes[thread_id].object_id = sorted_object_ids[thread_id];
-    // needed to recognize that this node is a leaf
+    // needed to recognize that this node is a leafF
     leaf_nodes[thread_id].child_l = -1;
 
     // Need to set for internal node parent to nullptr, to detect the root node.
@@ -211,120 +155,8 @@ __forceinline__ __device__ int delta(int l, int r, unsigned int n, unsigned int 
     return __clz(kl ^ kr);
 }
 
-static __forceinline__ __device__ uint64_t fast_delta(unsigned int a, unsigned int b, unsigned int *morton_codes) {
-    return ((uint64_t)morton_codes[a] << 32 | a) ^ ((uint64_t)morton_codes[b] << 32 | b);
-}
-
-__forceinline__ __device__ int2
-determine_range(unsigned int *sorted_morton_codes, unsigned int n, int i) {
-    unsigned int *c = sorted_morton_codes;
-    unsigned int ki = c[i]; // key of i
-
-    // determine direction of the range (+1 or -1)
-    const int delta_l = delta(i, i - 1, n, c, ki);
-    const int delta_r = delta(i, i + 1, n, c, ki);
-
-    int d;         // direction
-    int delta_min; // min of delta_r and delta_l
-    if (delta_r < delta_l) {
-        d = -1;
-        delta_min = delta_r;
-    } else {
-        d = 1;
-        delta_min = delta_l;
-    }
-
-    // compute upper bound of the length of the range
-    unsigned int l_max = 2;
-    while (delta(i, i + l_max * d, n, c, ki) > delta_min) {
-        l_max <<= 1;
-    }
-
-    // find other end using binary search
-    unsigned int l = 0;
-    for (unsigned int t = l_max >> 1; t > 0; t >>= 1) {
-        if (delta(i, i + (l + t) * d, n, c, ki) > delta_min) {
-            l += t;
-        }
-    }
-    const int j = i + l * d;
-
-    // ensure i <= j
-    return i < j ? make_int2(i, j) : make_int2(j, i);
-}
-
-__forceinline__ __device__ int find_split(
-    unsigned int *sorted_morton_codes, int first, int last, unsigned int n) {
-    const unsigned int first_code = sorted_morton_codes[first];
-
-    // calculate the number of highest bits that are the same
-    // for all objects, using the count-leading-zeros intrinsic
-
-    const int common_prefix = delta(first, last, n, sorted_morton_codes, first_code);
-
-    // use binary search to find where the next bit differs
-    // specifically, we are looking for the highest object that
-    // shares more than commonPrefix bits with the first one
-
-    int split = first; // initial guess
-    int step = last - first;
-
-    do {
-        step = (step + 1) >> 1;             // exponential decrease
-        const int new_split = split + step; // proposed new position
-
-        if (new_split < last) {
-            const int split_prefix = delta(first, new_split, n, sorted_morton_codes, first_code);
-            if (split_prefix > common_prefix) {
-                split = new_split; // accept proposal
-            }
-        }
-    } while (step > 1);
-
-    return split;
-}
-
-// Build the internal nodes.
-__global__ void internal_nodes(
-    unsigned int *sorted_morton_codes,
-    unsigned int *sorted_object_ids,
-    unsigned int num_objects,
-    bvh_node *nodes) {
-    const unsigned int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
-    // N.B., we want i in range [0, num_objects - 1) since every thread sets one internal node.
-    if (thread_id >= num_objects - 1)
-        return;
-
-    bvh_node *internal_nodes = nodes;
-
-    // find out which range of objects the node corresponds to
-    const int2 range = determine_range(sorted_morton_codes, num_objects, thread_id);
-
-    // determine where to split the range
-    const int split = find_split(sorted_morton_codes, range.x, range.y, num_objects);
-
-    // select left child
-    int child_l;
-    if (split == range.x) {
-        child_l = get_leaf_node_idx(split, num_objects);
-    } else {
-        child_l = get_internal_node_idx(split);
-    }
-
-    // select right child
-    int child_r;
-    if (split + 1 == range.y) {
-        child_r = get_leaf_node_idx(split + 1, num_objects);
-    } else {
-        child_r = get_internal_node_idx(split + 1);
-    }
-
-    // record parent-child relationships
-    internal_nodes[thread_id].child_l = child_l;
-    internal_nodes[thread_id].child_r = child_r;
-    internal_nodes[thread_id].visited = 0;
-    nodes[child_l].paren = get_internal_node_idx(thread_id);
-    nodes[child_r].paren = get_internal_node_idx(thread_id);
+static __forceinline__ __device__ uint64_t fast_delta(unsigned int a, unsigned int b, unsigned int* morton_codes){
+    return ((uint64_t)morton_codes[a] << 32 | a)  ^ ((uint64_t)morton_codes[b] << 32 | b);
 }
 
 // Load float3 at global level (cache in L2 and below, not L1).
@@ -551,6 +383,63 @@ static inline __device__ void ploc_merge(unsigned int lane_id, uint32_t left, ui
     store_indicies(num_left + num_right, cluster_index, state, left_start);
 }
 
+__global__ void build_bvh(build_state state, uint morton_codes){
+    const uint index = blockDim.x * blockIdx.x + threadIdx.x;
+
+    uint left = index;
+    uint right = index;
+
+    uint split = 0;
+
+    bool lane_active = index < build_state.prim_count;
+
+    while(__ballot_sync(FULL_MASK, lane_active)){
+
+        if(lane_active){
+
+            uint previous_id;
+
+            if(find_parent_id(left, right, build_state.prim_count, morton_codes) == right){
+
+                previous_id = atomicExch(&build_state.parent_indicies[right], left);
+
+                if(previous_id != INVALID_IDX){
+                    split = right + 1;
+
+                    right = previous_id;
+                }
+            }
+            else {
+
+                previous_id = atomicExch(&build_state.parent_indicies[left - 1], right);
+
+                if(previous_id != INVALID_IDX){
+                    split = left;
+
+                    left = previous_id;
+                }
+            }
+
+            if(previous_id == INVALID_IDX){
+                lane_active = false;
+            }
+        }
+
+        uint = right - left + 1;
+        bool final = lane_active && size == build_state.prim_count;
+
+        uint warp_mask = __ballot_sync(FULL_MASK, lane_active && (size > MERGING_THRESHOLD) || final);
+
+        while (warpMask){
+            uint lane_id = __ffs(warp_mask) - 1;
+
+            plock_merge(lane_id, left, right, split, final, build_state);
+
+            warp_mask = warp_mask & (warp_mask - 1);
+        }
+    }
+}
+
 __device__ cluster make_cluster_from_leaf(int node_idx, float3 min, float3 max) {
     cluster c;
     c.node_idx = node_idx;
@@ -623,79 +512,6 @@ __device__ cluster merge_clusters_to_node(
 
 __device__ bool is_active_cluster(const cluster &c) {
     return c.active != 0 && c.node_idx != -1;
-}
-
-// Set internal node bounding boxes by traversing the tree from the leaf nodes.
-__global__ void set_aabb(
-    unsigned int num_objects, bvh_node *nodes, const float3 *positions, const int *pos_indices) {
-    const unsigned int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (thread_id >= num_objects)
-        return;
-
-    bvh_node *leaf_nodes = nodes + num_objects - 1;
-
-    const unsigned int object_id = leaf_nodes[thread_id].object_id;
-
-    int idx_u = pos_indices[3 * object_id + 0];
-    int idx_v = pos_indices[3 * object_id + 1];
-    int idx_w = pos_indices[3 * object_id + 2];
-
-    float3 u = positions[idx_u];
-    float3 v = positions[idx_v];
-    float3 w = positions[idx_w];
-
-    // set bounding box of leaf node
-    const float3 min = fminf(u, fminf(v, w));
-    const float3 max = fmaxf(u, fmaxf(v, w));
-
-    // Bounding boxes must be loaded and stored without caching in L1,
-    // as they may be loaded and stored by threads not on the same SM.
-
-    __stcg(&(leaf_nodes[thread_id].min), min);
-    __stcg(&(leaf_nodes[thread_id].max), max);
-
-    // Recursively set tree bounding boxes, `curr_node` is always an
-    // internal node (since it is parent of another).
-    int curr_node_idx = leaf_nodes[thread_id].paren;
-    while (true) {
-        // Memory fences must be used to lock-step setting the bounding
-        // boxes and marking nodes as visited.
-        __threadfence();
-
-        // We have reached the parent of the root node: terminate.
-        if (curr_node_idx == -1)
-            break;
-
-        bvh_node &curr_node = nodes[curr_node_idx];
-
-        // We have reached an inner node: check whether the node was visited.
-        unsigned int visited = atomicAdd(&(curr_node.visited), 1);
-        assert(visited == 0 || visited == 1);
-
-        // This is the first thread entering: terminate
-        if (visited == 0)
-            break;
-
-        __threadfence();
-
-        // This is the second thread entering, we know that our sibling has reached
-        // the current node and terminated, and hence the sibling bounding box is correct.
-
-        const bvh_node &child_l = nodes[curr_node.child_l];
-        const bvh_node &child_r = nodes[curr_node.child_r];
-
-        // Set running bounding box to be the union of bounding boxes.
-        const float3 a_min = __ldcg(&(child_l.min));
-        const float3 a_max = __ldcg(&(child_l.max));
-        const float3 b_min = __ldcg(&(child_r.min));
-        const float3 b_max = __ldcg(&(child_r.max));
-
-        __stcg(&(curr_node.min), fminf(a_min, b_min));
-        __stcg(&(curr_node.max), fmaxf(a_max, b_max));
-
-        // Continue traversal.
-        curr_node_idx = curr_node.paren;
-    }
 }
 
 struct kernel_timer {
