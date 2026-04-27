@@ -71,7 +71,7 @@ struct bvh {
 //empty for now but will be needed later
 struct build_state{
 
-    buf_gpu<bvh_node> nodes;
+    bvh_node* nodes;
     uint* cluster_indicies;
     uint* parent_indicies;
     uint prim_count;
