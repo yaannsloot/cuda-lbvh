@@ -59,6 +59,10 @@ target_link_libraries(cuda-lbvh-fast PUBLIC ${LIBS})
 target_compile_definitions(cuda-lbvh PRIVATE __NV_NO_VECTOR_DEPRECATION_DIAG)
 target_compile_definitions(cuda-lbvh-fast PRIVATE __NV_NO_VECTOR_DEPRECATION_DIAG)
 
+target_compile_options(cuda-lbvh-fast PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>
+)
+
 # Configure to supply variables.
 configure_file(python/benchmark.py.in python/benchmark.py.in.2)
 # Generate to supply generator expressions.

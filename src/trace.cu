@@ -86,6 +86,7 @@ __forceinline__ __device__ hit traverse(
     const int* pos_indices,
     const int* nor_indices,
     const bvh_node* nodes,
+    int root_idx,
     float3 origin,
     float3 direction,
     float tmin,
@@ -98,7 +99,7 @@ __forceinline__ __device__ hit traverse(
     // and push 0 to indicate that there are no postponed nodes
     int stack[64];
     int* stack_ptr = stack;
-    *stack_ptr++   = 0;
+    *stack_ptr++   = -1;
 
     // closest hit, u and v
     float3 closest = make_float3(tmax, 0.f, 0.f);
@@ -106,7 +107,7 @@ __forceinline__ __device__ hit traverse(
     unsigned int object_id;
 
     // traverse nodes starting from the root, which is the first internal node
-    int curr = 0;
+    int curr = root_idx;
     do {
         // check each child node for overlap.
         int child_l_idx         = nodes[curr].child_l;
@@ -145,7 +146,7 @@ __forceinline__ __device__ hit traverse(
                 *stack_ptr++ = child_r_idx; // push
             }
         }
-    } while (curr != 0);
+    } while (curr != -1);
 
     hit h;
     if (closest.x < tmax) {
@@ -185,7 +186,8 @@ __forceinline__ __device__ float3 generate_pixel(
     const float3* normals,
     const int* pos_indices,
     const int* nor_indices,
-    const bvh_node* bvh_root)
+    const bvh_node* bvh_root,
+    int root_idx)
 {
     // initialize random based on sample index and image index
     uint seed = tea<16>(image_idx, sample_idx);
@@ -210,6 +212,7 @@ __forceinline__ __device__ float3 generate_pixel(
             pos_indices,
             nor_indices,
             bvh_root,
+            root_idx,
             ray_origin,
             ray_direction,
             1e-4f,
@@ -263,7 +266,8 @@ __global__ void generate_pixel_regeneration(
     const float3* normals,
     const int* pos_indices,
     const int* nor_indices,
-    const bvh_node* bvh_root)
+    const bvh_node* bvh_root,
+    int root_idx)
 {
     const ulong max_count = size_x * size_y * sample_count;
     while (true) {
@@ -289,7 +293,8 @@ __global__ void generate_pixel_regeneration(
             normals,
             pos_indices,
             nor_indices,
-            bvh_root);
+            bvh_root,
+            root_idx);
 
         // atomically add to buffer
         atomicAdd(&buffer[3 * image_idx + 0], radiance.x / float(sample_count));
@@ -361,7 +366,8 @@ bool generate(
         bvh.normals.get_ptr(),
         bvh.pos_indices.get_ptr(),
         bvh.nor_indices.get_ptr(),
-        bvh.nodes.get_ptr());
+        bvh.nodes.get_ptr(),
+        bvh.root_idx);
     RETURN_IF_CUDA_ERR(cudaGetLastError());
 
     // print elapsed time

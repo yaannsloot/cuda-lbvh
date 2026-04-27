@@ -310,7 +310,7 @@ static inline __device__ uint32_t merge_clusters(uint32_t n_prim, uint32_t neigh
     uint32_t merge_mask = __ballot_sync(FULL_MASK, can_merge);
     uint32_t new_nodes = __popc(merge_mask);
 
-    uint32_t global_base_idx;
+    uint32_t global_base_idx = 0;
     if (warp_id == 0)
         global_base_idx = atomicAdd(state.cluster_count, new_nodes);
 
@@ -356,7 +356,7 @@ static inline __device__ void ploc_merge(unsigned int lane_id, uint32_t left, ui
     uint32_t left_start = __shfl_sync(FULL_MASK, left, lane_id);
     uint32_t right_end = __shfl_sync(FULL_MASK, right, lane_id) + 1;
     uint32_t left_end = __shfl_sync(FULL_MASK, split, lane_id);
-    uint32_t right_start = left_end + 1;
+    uint32_t right_start = left_end;
 
     uint32_t lane_warp_index = threadIdx.x & (WARP_SIZE - 1);
 
@@ -468,6 +468,7 @@ __global__ void initalize_nodes(
     leaf.min = min;
     leaf.max = max;
     leaf.paren = -1;
+    state.cluster_indicies[thread_id] = (uint32_t)leaf_node_idx; 
 }
 
 struct kernel_timer {
@@ -634,6 +635,11 @@ bool build(const scene &s, bvh &bvh) {
     t_build.end();
     RETURN_IF_CUDA_ERR(cudaGetLastError());
 
+    uint32_t internal_count = 0;
+    cudaMemcpy(&internal_count, d_cluster_count.get_ptr(),
+            sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    bvh.root_idx = (int)internal_count - 1;
+
     // print elapsed time
     RETURN_IF_CUDA_ERR(cudaEventRecord(stop));
     RETURN_IF_CUDA_ERR(cudaEventSynchronize(stop));
@@ -648,5 +654,6 @@ bool build(const scene &s, bvh &bvh) {
     printf("  radix_sort:      %7.4f ms\n", t_sort.ms());
     printf("  init_nodes:      %7.4f ms\n", t_init.ms());
     printf("  build:           %7.4f ms\n", t_build.ms());
+
     return true;
 }

@@ -60,6 +60,7 @@ struct bvh_node {
 struct bvh {
     // First N - 1 internal nodes.
     // Followed by N leaf nodes, one for every triangle.
+    int root_idx;
     buf_gpu<bvh_node> nodes;
     // See `scene`.
     buf_gpu<float3> positions;

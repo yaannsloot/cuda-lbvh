@@ -343,6 +343,8 @@ struct kernel_timer {
 };
 
 bool build(const scene &s, bvh &bvh) {
+    bvh.root_idx = 0;
+
     const int num_triangles = s.pos_indices.size() / 3;
     // must have at least two triangles. we cannot build a bvh for zero
     // triangles, and a bvh of one triangle has no internal nodes
