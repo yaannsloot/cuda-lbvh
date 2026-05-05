@@ -9,11 +9,12 @@ LBVH, this allows for a simple illustration of its performance.
 
 The table below lists the construction and rendering performance for three scenes, each with a one megapixel resolution, a path length of up to 80 bounces, and 250 samples per pixel. Note that the images are thumbnails, full resolution images can be found in `doc`.
 
-| Scene       | Triangle count | Build time | Build Mtriangles/s | Trace Mray/s | Image                                                                    |
-| ----------- | -------------- | ---------- | ------------------ | ------------ | ------------------------------------------------------------------------ |
-| `sanmiguel` | 9,963,191      | 29.8ms     | 333.79             | 0.53         | [![doc/sanmiguel_thumb.png](doc/sanmiguel_thumb.png)](doc/sanmiguel.png) |
-| `sibenik`   | 73,564         | 0.48ms     | 152.24             | 3.35         | [![doc/sibenik_thumb.png](doc/sibenik_thumb.png)](doc/sibenik.png)       |
-| `sponza`    | 262,267        | 0.96ms     | 273.33             | 1.88         | [![doc/sponza_thumb.png](doc/sponza_thumb.png)](doc/sponza.png)          |
+| Scene       | Triangle count | Build time (Karras) | Build Mtriangles/s (Karras) | Build time (H-PLOC) | Build Mtriangles/s (H-PLOC) | Image                                                                    |
+| ----------- | -------------- | ------------------- | --------------------------- | ------------------- | --------------------------- |  ------------------------------------------------------------------------ |
+| `sanmiguel` | 9,963,191      | 12.0ms              | 831.15                      | 9.35ms (-22.08%)    | 1066.00 (+28.26%)           | [![doc/sanmiguel_thumb.png](doc/sanmiguel_thumb.png)](doc/sanmiguel.png) |
+| `sibenik`   | 73,564         | 2.18ms              | 33.74                       | 0.32ms (-85.32%)    | 232.51 (+589.12%)           | [![doc/sibenik_thumb.png](doc/sibenik_thumb.png)](doc/sibenik.png)       |
+| `sponza`    | 262,267        | 2.36ms              | 111.00                      | 0.56ms (-76.27%)    | 465.86 (+319.69%)           | [![doc/sponza_thumb.png](doc/sponza_thumb.png)](doc/sponza.png)          |
+
 
 ## System requirements and dependencies
 
